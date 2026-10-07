@@ -24,7 +24,8 @@ Ouvrir `index.html` dans un navigateur (aucune dépendance, aucun serveur).
 ## Modèle physique (banc de laboratoire)
 
 - Chariot de 1 kg sur un rail de ±0,6 m terminé par des butées en caoutchouc (le choc est transmis au pendule).
-- Pendule : tige homogène de 0,6 m et 250 g.
+- Pendule de 0,6 m et 250 g, au choix : masse au bout d'une tige légère (par défaut) ou tige homogène.
+- Forces sur la masse : poids P, ses composantes P∥ / P⊥ et force T de la tige, avec un encart zoomé.
 - Moteur à courant continu : F = αV − βẋ (α = 1,72 N/V, β = 7,7 N·s/m, |V| ≤ 10 V), soit 17 N max à l'arrêt et environ 2,1 m/s max.
 - Calculateur échantillonné (5 ms), encodeurs quantifiés et bruités, vitesses estimées, frottement sec.
 - La souris agit comme une main (lien élastique) sur le chariot ou le bout de la tige ; la simulation ne s'arrête jamais.

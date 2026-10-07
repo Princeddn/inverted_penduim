@@ -87,6 +87,11 @@
 
             <div class="control-group">
                 <h3>Système</h3>
+                <label for="pole-type">Pendule</label>
+                <select id="pole-type">
+                    <option value="bob" selected>Masse au bout d'une tige légère</option>
+                    <option value="rod">Tige homogène (masse répartie)</option>
+                </select>
                 <div class="param-row">
                     <label for="mc-slider">m<sub>c</sub> (kg)</label>
                     <input type="range" id="mc-slider" min="0.3" max="3" step="0.05" value="1">
@@ -98,8 +103,8 @@
                     <span class="value" id="mp-value"></span>
                 </div>
                 <div class="param-row">
-                    <label for="l-slider">l (m)</label>
-                    <input type="range" id="l-slider" min="0.1" max="0.6" step="0.01" value="0.3">
+                    <label for="l-slider">Longueur L (m)</label>
+                    <input type="range" id="l-slider" min="0.2" max="1.2" step="0.02" value="0.6">
                     <span class="value" id="l-value"></span>
                 </div>
                 <div class="param-row">
@@ -194,6 +199,8 @@
                 <span><i style="background:#27ae60"></i>F : moteur</span>
                 <span><i style="background:#2980b9"></i>N : réaction du rail</span>
                 <span><i style="background:#16a085"></i>R : pivot sur la tige</span>
+                <span><i style="background:#8e44ad"></i>T : tige sur la masse</span>
+                <span><i style="background:#d35400;height:0;border-top:2px dashed #d35400"></i>P∥, P⊥ : composantes du poids</span>
                 <span><i style="background:#7f8c8d"></i>f : frottements</span>
                 <span><i style="background:#2c3e50"></i>Main : votre action</span>
                 <span><i style="background:#c0392b"></i>Butée : choc en bout de rail</span>
@@ -209,13 +216,14 @@
     <section class="readme-section">
         <h2>Modèle et commande</h2>
         <p>État : position du chariot <em>x</em>, angle <em>θ</em> mesuré depuis la verticale haute (θ &gt; 0 vers la droite).</p>
-        <div class="equation">(m<sub>c</sub>+m<sub>p</sub>) ẍ + m<sub>p</sub> l cos θ θ̈ = F<sub>moteur</sub> − b ẋ − F<sub>s</sub> sgn ẋ + F<sub>butée</sub> + F<sub>main</sub> + m<sub>p</sub> l θ̇² sin θ</div>
+        <div class="equation">(m<sub>c</sub>+m<sub>p</sub>) ẍ + m<sub>p</sub> l<sub>c</sub> cos θ θ̈ = F<sub>moteur</sub> − b ẋ − F<sub>s</sub> sgn ẋ + F<sub>butée</sub> + F<sub>main</sub> + m<sub>p</sub> l<sub>c</sub> θ̇² sin θ</div>
         <div class="equation">F<sub>moteur</sub> = α V − β ẋ, &nbsp; |V| ≤ V<sub>max</sub></div>
-        <div class="equation">cos θ ẍ + (4l/3) θ̈ = g sin θ − c/(m<sub>p</sub> l) θ̇</div>
+        <div class="equation">m<sub>p</sub> l<sub>c</sub> cos θ ẍ + J θ̈ = m<sub>p</sub> g l<sub>c</sub> sin θ − c θ̇ &nbsp; (l<sub>c</sub> : pivot → centre de masse, J : inertie autour du pivot)</div>
         <p>Force voulue par le contrôleur (convertie ensuite en tension moteur, saturée à ±V<sub>max</sub>) :</p>
         <div class="equation">F = K<sub>p</sub> θ + K<sub>i</sub> ∫θ dt + K<sub>d</sub> θ̇ + K<sub>x</sub> (x − x<sub>ref</sub>) + K<sub>v</sub> ẋ</div>
         <ul>
-            <li>Le pendule est une tige homogène de longueur 2l (point blanc = centre de masse), d'inertie m<sub>p</sub>l²/3.</li>
+            <li>Deux modèles de pendule de longueur L : masse ponctuelle au bout d'une tige légère (centre de masse à L, inertie m<sub>p</sub>L²), ou tige homogène (centre de masse à L/2, point blanc, inertie m<sub>p</sub>L²/3).</li>
+            <li>Sur la masse : poids P et ses composantes P∥ (le long de la tige) et P⊥ (perpendiculaire, celle qui fait tomber le pendule), et force T de la tige sur la masse.</li>
             <li>Mode « banc réel » : le calculateur (période Ts) mesure x et θ par encodeurs bruités et quantifiés, calcule la force voulue F*, puis envoie au moteur la tension V = (F* + β ẋ)/α, saturée à V<sub>max</sub>. Le moteur perd de la force quand le chariot va vite (force contre-électromotrice) : vitesse max ≈ αV<sub>max</sub>/β ≈ 2,2 m/s.</li>
             <li>Rail fini : en bout de course, le chariot tape des butées en caoutchouc (ressort + amortisseur raides) ; le choc est transmis au pendule.</li>
             <li>Forces affichées : poids P (tige, en G) et Pc (chariot), force F du moteur, réaction N du rail (répartie sur les roues), force R du pivot sur la tige (R = m<sub>p</sub>a<sub>G</sub> − m<sub>p</sub>g), frottements f du rail.</li>
