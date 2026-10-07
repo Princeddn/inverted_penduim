@@ -134,7 +134,16 @@ class PIDController {
         Object.assign(this, gains);
         this.integral = 0;
         this.maxIntegral = 0.5;
-        this.fallAngle = Math.PI / 2; // au-dela le controleur abandonne
+        this.catchAngle = 0.4;   // |theta| sous lequel on passe en stabilisation (23 deg)
+        this.dropAngle = 0.8;    // |theta| au-dela duquel on repasse en redressement
+        this.swingUp = true;     // redressement automatique depuis la position basse
+        this.swingGain = 8;      // gain du pompage d'energie
+        this.swingAccel = 1.2;   // acceleration max du chariot en redressement (en g)
+        this.swingKx = 1.5;      // rappel du chariot vers le centre pendant le redressement
+        this.swingKv = 3.0;
+        this.swingMargin = 0.2;  // vise un peu plus que l'energie du sommet pour l'atteindre
+        this.phase = 'swing';    // 'swing' (redressement) | 'balance' (stabilisation)
+        this.plant = null;       // parametres physiques (masses, l, g) pour le redressement
     }
 
     setGains(gains) {
@@ -145,9 +154,17 @@ class PIDController {
         const [x, x_dot, theta, theta_dot] = state;
         const th = wrapAngle(theta);
 
-        if (Math.abs(th) > this.fallAngle) {
+        // Machine a etats avec hysteresis : redressement <-> stabilisation
+        if (this.phase === 'balance' && Math.abs(th) > this.dropAngle) {
+            this.phase = 'swing';
             this.integral = 0;
-            return 0;
+        } else if (this.phase === 'swing' && Math.abs(th) < this.catchAngle) {
+            this.phase = 'balance';
+            this.integral = 0;
+        }
+
+        if (this.phase === 'swing') {
+            return this.swingUp && this.plant ? this.swingForce(state, xRef) : 0;
         }
 
         this.integral = clamp(this.integral + th * dt, -this.maxIntegral, this.maxIntegral);
@@ -156,8 +173,30 @@ class PIDController {
              + this.kx * (x - xRef) + this.kv * x_dot;
     }
 
+    // Redressement par pompage d'energie (Astrom & Furuta).
+    // E = 1/2 J th'^2 + mp g l (cos th - 1) vaut 0 en haut et -2 mp g l en bas.
+    // dE/dt = -mp l cos(th) th' x'' : on accelere le chariot pour faire monter E vers 0.
+    swingForce(state, xRef) {
+        const [x, x_dot, theta, theta_dot] = state;
+        const { mc, mp, l, g } = this.plant;
+        const J = mp * l * (4 * l / 3);                 // inertie de la tige autour du pivot
+        const E = 0.5 * J * theta_dot ** 2 + mp * g * l * (Math.cos(theta) - 1);
+        const E0 = 2 * mp * g * l;
+
+        // Au repos parfait en bas, sign(0) = 0 : on donne un premier coup
+        const dir = Math.abs(theta_dot) > 1e-3 ? Math.sign(theta_dot * Math.cos(theta)) : 1;
+        const aMax = this.swingAccel * g;
+        let a = clamp(this.swingGain * g * (E / E0 - this.swingMargin) * dir, -aMax, aMax);
+
+        // Rappel doux du chariot vers le centre pour rester sur le rail
+        a += -this.swingKx * (x - xRef) - this.swingKv * x_dot;
+
+        return (mc + mp) * a;
+    }
+
     reset() {
         this.integral = 0;
+        this.phase = 'swing';
     }
 
     // Auto-reglage par placement de poles (Ackermann) sur le modele linearise.
@@ -401,7 +440,7 @@ class Animation {
 
         this.scale = 150; // pixels par metre
         this.centerX = this.canvas.width / 2;
-        this.cartY = this.canvas.height * 0.68; // le pendule monte au-dessus du chariot
+        this.cartY = this.canvas.height * 0.5; // place pour la tige en haut comme en bas
 
         this.cartWidth = 70;
         this.cartHeight = 30;
@@ -842,6 +881,8 @@ class ControlLoop {
         this.physics = physics;
         this.controller = controller;
         this.sensors = sensors;
+        this.controller.plant = physics;
+        this.active = true;      // false : controleur coupe, le pendule reste libre
         this.enabled = true;
         this.ts = 0.01;
         this.tau = 0.02;
@@ -866,6 +907,13 @@ class ControlLoop {
 
     step(dt, xRef, push = 0, integrator = 'rk4') {
         const p = this.physics;
+
+        if (!this.active) {
+            this.command = 0;
+            this.motorForce = 0;
+            p.step(push, integrator);
+            return;
+        }
 
         if (!this.enabled) {
             this.command = this.controller.compute(p.state, xRef, dt);
@@ -917,7 +965,7 @@ class InvertedPendulumApp {
     }
 
     bindUI() {
-        this.ui.onPlay = () => this.play();
+        this.ui.onPlay = () => this.start();
         this.ui.onPause = () => this.pause();
         this.ui.onReset = () => this.reset();
         this.ui.onImpulse = () => this.applyImpulse();
@@ -934,12 +982,11 @@ class InvertedPendulumApp {
             this.physics.setState(clamp(this.physics.x + dx, -lim, lim), 0, this.physics.theta, 0);
         };
         this.animation.onPendulumDrag = (theta) => {
-            this.physics.setState(this.physics.x, 0, clamp(theta, -Math.PI / 2, Math.PI / 2), 0);
+            this.physics.setState(this.physics.x, 0, theta, 0);
         };
         this.animation.onDragEnd = () => {
             this.bench.reset();
-            this.performance.reset(this.ui.mode, this.physics.x);
-            this.performance.t0 = this.physics.t;
+            this.measuring = false;
         };
     }
 
@@ -955,6 +1002,12 @@ class InvertedPendulumApp {
 
     get targetX() {
         return this.ui.mode === 'project' ? 0.2 : 0;
+    }
+
+    // « Lancer » : active le controleur (redressement puis stabilisation)
+    start() {
+        this.bench.active = true;
+        this.play();
     }
 
     play() {
@@ -973,12 +1026,18 @@ class InvertedPendulumApp {
 
     reset() {
         const scenario = this.ui.scenarioSelect.value;
-        // Impulsion : on part a l'equilibre et on perturbe apres 1 s
-        const initial = scenario === 'impulse' ? [0, 0, 0, 0] : [0, 0, 0.1, 0];
+        // Redressement : le pendule pend au repos et le controleur attend « Lancer ».
+        // Impulsion : on part a l'equilibre haut et on perturbe apres 1 s.
+        const initial = {
+            swingup: [0, 0, Math.PI, 0],
+            impulse: [0, 0, 0, 0]
+        }[scenario] || [0, 0, 0.1, 0];
 
         this.physics.updateParams(this.ui.getSystemParams());
         this.physics.reset(initial);
         this.bench.reset();
+        this.bench.active = scenario !== 'swingup';
+        this.measuring = false;
         this.performance.reset(this.ui.mode, 0);
         this.performance.t0 = 0;
         this.pendingImpulseAt = scenario === 'impulse' ? 1.0 : null;
@@ -1055,7 +1114,18 @@ class InvertedPendulumApp {
 
         this.bench.step(sim.dt, this.targetX, push, sim.integrator);
 
-        this.performance.update(p.t - (this.performance.t0 || 0), p.x, p.theta, this.targetX);
+        // Les indicateurs mesurent la stabilisation : ils demarrent quand le pendule est rattrape en haut
+        const balancing = this.bench.active && this.controller.phase === 'balance';
+        if (balancing && !this.measuring) {
+            this.measuring = true;
+            this.performance.reset(this.ui.mode, p.x);
+            this.performance.t0 = p.t;
+        } else if (!balancing) {
+            this.measuring = false;
+        }
+        if (this.measuring) {
+            this.performance.update(p.t - this.performance.t0, p.x, p.theta, this.targetX);
+        }
         this.anglePlot.addPoint(p.t, p.theta);
         this.positionPlot.addPoint(p.t, p.x);
     }
@@ -1065,7 +1135,16 @@ class InvertedPendulumApp {
         this.animation.draw(p.x, p.theta, p.l, p.lastForce, this.ui.mode === 'project' ? this.targetX : null);
         this.anglePlot.draw();
         this.positionPlot.draw();
-        this.ui.updateIndicators(this.performance.getMetrics(p.lastForce));
+        const m = this.performance.getMetrics(p.lastForce);
+        if (!this.measuring) m.angleStatus = null;
+        if (!this.bench.active) {
+            m.systemStatus = 'Au repos';
+            m.overallStatus = null;
+        } else if (this.controller.phase === 'swing') {
+            m.systemStatus = 'Redressement';
+            m.overallStatus = 'warning';
+        }
+        this.ui.updateIndicators(m);
     }
 }
 

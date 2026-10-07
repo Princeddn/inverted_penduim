@@ -14,6 +14,7 @@ Ouvrir `index.html` dans un navigateur (aucune dépendance, aucun serveur).
 
 ## Utilisation
 
+- **Départ en bas** : le pendule pend au repos ; « Lancer » le redresse (pompage d’énergie) puis le stabilise.
 - **Stabilisation** : ramène θ → 0 et x → 0.
 - **Suivi x = 0.2 m** : déplace le chariot vers 0.2 m en gardant le pendule debout.
 - **Impulsion** : 1 N·s appliqué au chariot.
