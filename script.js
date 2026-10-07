@@ -550,6 +550,7 @@ class Animation {
         const cartX = this.cartPx();
         this.drawForce(cartX, force);
         this.drawCart(cartX);
+        this.drawAngle(cartX, theta);
         this.drawPole(cartX);
         this.drawValues(x, theta, force);
         this.drawInstructions();
@@ -594,6 +595,56 @@ class Animation {
             ctx.arc(x + dx, y + h / 2, this.wheelRadius, 0, 2 * Math.PI);
             ctx.fill();
         }
+    }
+
+    // Angle theta : verticale de reference (haut) en pointilles + arc jusqu'a la tige
+    drawAngle(cartX, theta) {
+        const ctx = this.ctx, y = this.cartY;
+        const L = 2 * this.currentL * this.scale;
+        const up = -Math.PI / 2;                 // direction "vers le haut" dans le canvas
+        const r = Math.max(35, Math.min(90, L * 0.6));
+
+        ctx.save();
+        ctx.strokeStyle = '#7f8c8d';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 5]);
+        ctx.beginPath();
+        ctx.moveTo(cartX, y);
+        ctx.lineTo(cartX, y - L - 15);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        if (Math.abs(theta) > 0.003) {
+            // Arc entre la verticale et la tige (theta > 0 = sens horaire a l'ecran)
+            ctx.strokeStyle = ctx.fillStyle = '#8e44ad';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.arc(cartX, y, r, up, up + theta, theta < 0);
+            ctx.stroke();
+
+            // Pointe de fleche au bout de l'arc
+            const end = up + theta, s = Math.sign(theta);
+            const ex = cartX + r * Math.cos(end), ey = y + r * Math.sin(end);
+            const tx = -Math.sin(end) * s, ty = Math.cos(end) * s;   // tangente dans le sens de l'arc
+            const nx = Math.cos(end), ny = Math.sin(end);
+            ctx.beginPath();
+            ctx.moveTo(ex, ey);
+            ctx.lineTo(ex - 8 * tx + 4 * nx, ey - 8 * ty + 4 * ny);
+            ctx.lineTo(ex - 8 * tx - 4 * nx, ey - 8 * ty - 4 * ny);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        // Etiquette au milieu de l'arc ; pour un petit angle, de l'autre cote de la verticale
+        // pour ne pas chevaucher la tige
+        const mid = up + (Math.abs(theta) > 0.8 ? theta / 2 : -Math.sign(theta || 1) * 0.45);
+        const lr = r + 22 + 30 * Math.abs(Math.cos(mid)); // s'eloigne du chariot quand l'etiquette est laterale
+        ctx.fillStyle = '#8e44ad';
+        ctx.font = 'bold 13px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`θ = ${(theta * 180 / Math.PI).toFixed(1)}°`, cartX + lr * Math.cos(mid), y + lr * Math.sin(mid));
+        ctx.restore();
     }
 
     drawPole(cartX) {
