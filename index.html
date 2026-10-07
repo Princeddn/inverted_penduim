@@ -89,27 +89,27 @@
                 <h3>Système</h3>
                 <div class="param-row">
                     <label for="mc-slider">m<sub>c</sub> (kg)</label>
-                    <input type="range" id="mc-slider" min="0.1" max="5" step="0.1" value="1">
+                    <input type="range" id="mc-slider" min="0.3" max="3" step="0.05" value="1">
                     <span class="value" id="mc-value"></span>
                 </div>
                 <div class="param-row">
                     <label for="mp-slider">m<sub>p</sub> (kg)</label>
-                    <input type="range" id="mp-slider" min="0.05" max="2" step="0.05" value="0.3">
+                    <input type="range" id="mp-slider" min="0.05" max="1" step="0.01" value="0.25">
                     <span class="value" id="mp-value"></span>
                 </div>
                 <div class="param-row">
                     <label for="l-slider">l (m)</label>
-                    <input type="range" id="l-slider" min="0.1" max="1.5" step="0.05" value="0.5">
+                    <input type="range" id="l-slider" min="0.1" max="0.6" step="0.01" value="0.3">
                     <span class="value" id="l-value"></span>
                 </div>
                 <div class="param-row">
                     <label for="b-slider">b (N·s/m)</label>
-                    <input type="range" id="b-slider" min="0" max="1" step="0.01" value="0.05">
+                    <input type="range" id="b-slider" min="0" max="5" step="0.1" value="0.5">
                     <span class="value" id="b-value"></span>
                 </div>
                 <div class="param-row">
                     <label for="c-slider">c (N·m·s)</label>
-                    <input type="range" id="c-slider" min="0" max="0.1" step="0.005" value="0.01">
+                    <input type="range" id="c-slider" min="0" max="0.02" step="0.001" value="0.002">
                     <span class="value" id="c-value"></span>
                 </div>
                 <div class="param-row">
@@ -118,11 +118,16 @@
                     <span class="value" id="g-value"></span>
                 </div>
                 <div class="param-row">
-                    <label for="fmax-slider">F<sub>max</sub> (N)</label>
-                    <input type="range" id="fmax-slider" min="5" max="200" step="1" value="50">
-                    <span class="value" id="fmax-value"></span>
+                    <label for="vmax-slider">Tension max</label>
+                    <input type="range" id="vmax-slider" min="5" max="24" step="0.5" value="10">
+                    <span class="value" id="vmax-value"></span>
                 </div>
-                <p style="font-size:0.85em;color:#7f8c8d">Après un changement de paramètres, cliquez sur « Auto-réglage ».</p>
+                <div class="param-row">
+                    <label for="rail-slider">Course ±</label>
+                    <input type="range" id="rail-slider" min="0.3" max="1" step="0.05" value="0.6">
+                    <span class="value" id="rail-value"></span>
+                </div>
+                <p style="font-size:0.85em;color:#7f8c8d">Moteur : 1,72 N/V, force contre-électromotrice 7,7 N·s/m (≈ 17 N à l'arrêt sous 10 V). Après un changement de paramètres, cliquez sur « Auto-réglage ».</p>
             </div>
             <div class="control-group">
                 <h3>Effets réels</h3>
@@ -131,17 +136,17 @@
                 </label>
                 <div class="param-row">
                     <label for="noise-slider">Bruit capteur</label>
-                    <input type="range" id="noise-slider" min="0" max="10" step="0.5" value="2">
+                    <input type="range" id="noise-slider" min="0" max="5" step="0.1" value="0.5">
                     <span class="value" id="noise-value"></span>
                 </div>
                 <div class="param-row">
                     <label for="ts-slider">Période Ts</label>
-                    <input type="range" id="ts-slider" min="1" max="30" step="1" value="10">
+                    <input type="range" id="ts-slider" min="1" max="20" step="1" value="5">
                     <span class="value" id="ts-value"></span>
                 </div>
                 <div class="param-row">
                     <label for="tau-slider">Retard moteur</label>
-                    <input type="range" id="tau-slider" min="0" max="80" step="1" value="20">
+                    <input type="range" id="tau-slider" min="0" max="40" step="1" value="5">
                     <span class="value" id="tau-value"></span>
                 </div>
                 <div class="param-row">
@@ -182,7 +187,16 @@
             </div>
 
             <div class="canvas-container">
-                <canvas id="animation-canvas" width="800" height="450" style="width:100%;height:auto"></canvas>
+                <canvas id="animation-canvas" width="800" height="520" style="width:100%;height:auto"></canvas>
+            </div>
+            <div class="force-legend" id="force-legend">
+                <span><i style="background:#d35400"></i>P, Pc : poids (tige, chariot)</span>
+                <span><i style="background:#27ae60"></i>F : moteur</span>
+                <span><i style="background:#2980b9"></i>N : réaction du rail</span>
+                <span><i style="background:#16a085"></i>R : pivot sur la tige</span>
+                <span><i style="background:#7f8c8d"></i>f : frottements</span>
+                <span><i style="background:#2c3e50"></i>Main : votre action</span>
+                <span><i style="background:#c0392b"></i>Butée : choc en bout de rail</span>
             </div>
 
             <div class="plots-container">
@@ -195,18 +209,20 @@
     <section class="readme-section">
         <h2>Modèle et commande</h2>
         <p>État : position du chariot <em>x</em>, angle <em>θ</em> mesuré depuis la verticale haute (θ &gt; 0 vers la droite).</p>
-        <div class="equation">(m<sub>c</sub>+m<sub>p</sub>) ẍ + m<sub>p</sub> l cos θ θ̈ = F − b ẋ − F<sub>s</sub> sgn ẋ + m<sub>p</sub> l θ̇² sin θ</div>
+        <div class="equation">(m<sub>c</sub>+m<sub>p</sub>) ẍ + m<sub>p</sub> l cos θ θ̈ = F<sub>moteur</sub> − b ẋ − F<sub>s</sub> sgn ẋ + F<sub>butée</sub> + F<sub>main</sub> + m<sub>p</sub> l θ̇² sin θ</div>
+        <div class="equation">F<sub>moteur</sub> = α V − β ẋ, &nbsp; |V| ≤ V<sub>max</sub></div>
         <div class="equation">cos θ ẍ + (4l/3) θ̈ = g sin θ − c/(m<sub>p</sub> l) θ̇</div>
-        <p>Commande (saturée à ±F<sub>max</sub>) :</p>
+        <p>Force voulue par le contrôleur (convertie ensuite en tension moteur, saturée à ±V<sub>max</sub>) :</p>
         <div class="equation">F = K<sub>p</sub> θ + K<sub>i</sub> ∫θ dt + K<sub>d</sub> θ̇ + K<sub>x</sub> (x − x<sub>ref</sub>) + K<sub>v</sub> ẋ</div>
         <ul>
             <li>Le pendule est une tige homogène de longueur 2l (point blanc = centre de masse), d'inertie m<sub>p</sub>l²/3.</li>
-            <li>Mode « banc réel » : commande numérique échantillonnée à Ts, moteur du 1er ordre, capteurs bruités et quantifiés, frottement sec du chariot.</li>
+            <li>Mode « banc réel » : le calculateur (période Ts) mesure x et θ par encodeurs bruités et quantifiés, calcule la force voulue F*, puis envoie au moteur la tension V = (F* + β ẋ)/α, saturée à V<sub>max</sub>. Le moteur perd de la force quand le chariot va vite (force contre-électromotrice) : vitesse max ≈ αV<sub>max</sub>/β ≈ 2,2 m/s.</li>
+            <li>Rail fini : en bout de course, le chariot tape des butées en caoutchouc (ressort + amortisseur raides) ; le choc est transmis au pendule.</li>
             <li>Forces affichées : poids P (tige, en G) et Pc (chariot), force F du moteur, réaction N du rail (répartie sur les roues), force R du pivot sur la tige (R = m<sub>p</sub>a<sub>G</sub> − m<sub>p</sub>g), frottements f du rail.</li>
             <li>Les gains sont positifs : pour rattraper le pendule, le chariot doit aller <strong>dans le sens</strong> de l'inclinaison.</li>
             <li>L'auto-réglage linéarise le système autour de θ = 0 et place les pôles (Ackermann) : 2 pôles lents pour la position, 2 rapides pour l'angle.</li>
             <li>Au départ le pendule pend au repos. « Lancer » active le contrôleur : il pompe de l'énergie en faisant osciller le chariot (redressement d'Åström-Furuta), puis passe en stabilisation quand |θ| &lt; 23°. S'il dépasse 46°, il repasse en redressement.</li>
-            <li>Interaction : glissez le chariot ou la masse, ou poussez le chariot avec les flèches ← / →.</li>
+            <li>Interaction : la souris agit comme une main (lien élastique) sur le chariot ou sur le bout de la tige ; la simulation continue pendant la prise et le moteur est coupé. Flèches ← / → : pousser le chariot (8 N).</li>
         </ul>
     </section>
 </div>

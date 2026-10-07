@@ -10,12 +10,13 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 // lisibles, sans chiffres qui scintillent a chaque image.
 const TEXT_REFRESH_MS = 250;
 const textCache = new Map();
+// Tous les textes changent dans la meme image (meme tranche de 250 ms) : ils restent coherents entre eux.
 const steady = (key, make) => {
-    const now = Date.now();
+    const slot = Math.floor(Date.now() / TEXT_REFRESH_MS);
     const c = textCache.get(key);
-    if (c && now - c.t < TEXT_REFRESH_MS) return c.s;
+    if (c && c.slot === slot) return c.s;
     const s = make();
-    textCache.set(key, { t: now, s });
+    textCache.set(key, { slot, s });
     return s;
 };
 
@@ -27,22 +28,35 @@ const wrapAngle = (a) => {
 };
 
 // ===== MODULE PHYSICS =====
+// Banc de type laboratoire : chariot entraine par un moteur a courant continu (pignon/cremaillere),
+// rail fini avec butees amorties, pendule = tige homogene. Tous les parametres sont en SI.
 class Physics {
     constructor(params = {}) {
-        this.mc = 1.0;      // masse chariot (kg)
-        this.mp = 0.3;      // masse pendule (kg)
-        this.l = 0.5;       // distance pivot -> masse (m)
-        this.b = 0.05;      // frottement chariot (N.s/m)
-        this.c = 0.01;      // frottement pivot (N.m.s)
-        this.g = 9.81;      // gravite (m/s2)
-        this.fMax = 50;     // saturation de l'actionneur (N)
-        this.railLimit = 2.2; // demi-longueur du rail (m)
-        this.coulomb = 0;   // frottement sec du chariot (N)
+        this.mc = 1.0;        // masse chariot + inertie ramenee du moteur (kg)
+        this.mp = 0.25;       // masse de la tige (kg)
+        this.l = 0.3;         // pivot -> centre de masse (m) : tige de 2l = 0.6 m
+        this.b = 0.5;         // frottement visqueux du chariot (N.s/m)
+        this.c = 0.002;       // frottement du pivot (N.m.s)
+        this.g = 9.81;        // gravite (m/s2)
+        this.coulomb = 0;     // frottement sec du chariot (N)
+        this.railLimit = 0.6; // course du centre du chariot : +-0.6 m (contact avec les butees)
+
+        // Moteur DC + reducteur + pignon : F = alpha V - beta x' (force contre-electromotrice)
+        this.motorModel = true;
+        this.alpha = 1.72;    // N/V
+        this.beta = 7.7;      // N.s/m
+        this.vMax = 10;       // tension max de l'amplificateur (V)
+
+        // Butees : ressort + amortisseur raides (caoutchouc)
+        this.kStop = 2e4;     // N/m
+        this.cStop = 120;     // N.s/m
+
         Object.assign(this, params);
 
         this.state = [0, 0, 0.1, 0]; // [x, x_dot, theta, theta_dot]
         this.t = 0;
         this.dt = 0.005;
+        this.input = { cmd: 0, cart: 0, tip: [0, 0] };
         this.lastForce = 0;
     }
 
@@ -50,98 +64,114 @@ class Physics {
         Object.assign(this, params);
     }
 
-    // Le pendule est une tige homogene de longueur 2l (centre de masse a l du pivot),
-    // inertie propre I = mp l^2 / 3, donc longueur equivalente Le = l + I/(mp l) = 4l/3.
+    // Force max a l'arret (pour l'affichage et le mode ideal)
+    get fMax() { return this.alpha * this.vMax; }
+
+    // Tige homogene de longueur 2l : I = mp l^2 / 3, longueur equivalente Le = 4l/3
     get lEq() { return 4 * this.l / 3; }
 
-    // Equations de Lagrange :
-    //  (mc+mp) x'' + mp l cos(th) th'' = F - b x' - Fs sgn(x') + mp l th'^2 sin(th)
-    //  cos(th) x'' + Le th''           = g sin(th) - c/(mp l) th'
-    derivatives(state, F) {
-        const [, x_dot, theta, theta_dot] = state;
-        const S = Math.sin(theta);
-        const C = Math.cos(theta);
-
-        const a11 = this.mc + this.mp;
-        const a12 = this.mp * this.l * C;
-        const a21 = C;
-        const a22 = this.lEq;
-
-        // Frottement sec lisse (tanh) pour rester integrable
-        const dry = this.coulomb * Math.tanh(x_dot / 0.01);
-        const v1 = F - this.b * x_dot - dry + this.mp * this.l * theta_dot * theta_dot * S;
-        const v2 = this.g * S - (this.c / (this.mp * this.l)) * theta_dot;
-
-        // det = (mc+mp) Le - mp l cos^2 > 0 toujours
-        const det = a11 * a22 - a12 * a21;
-        const x_ddot = (a22 * v1 - a12 * v2) / det;
-        const theta_ddot = (-a21 * v1 + a11 * v2) / det;
-
-        return [x_dot, x_ddot, theta_dot, theta_ddot];
-    }
-
-    rk4Step(F) {
-        const s = this.state, h = this.dt;
-        const k1 = this.derivatives(s, F);
-        const k2 = this.derivatives(s.map((v, i) => v + h * k1[i] / 2), F);
-        const k3 = this.derivatives(s.map((v, i) => v + h * k2[i] / 2), F);
-        const k4 = this.derivatives(s.map((v, i) => v + h * k3[i]), F);
-        for (let i = 0; i < 4; i++) {
-            s[i] += h * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]) / 6;
+    // Force du moteur selon la commande et la vitesse du chariot
+    motorForce(x_dot) {
+        if (this.motorModel) {
+            const V = clamp(this.input.cmd, -this.vMax, this.vMax);
+            return this.alpha * V - this.beta * x_dot;
         }
+        return clamp(this.input.cmd, -this.fMax, this.fMax); // source de force ideale
     }
 
-    eulerStep(F) {
-        const d = this.derivatives(this.state, F);
-        for (let i = 0; i < 4; i++) this.state[i] += this.dt * d[i];
+    // Force des butees (nulle tant que le chariot ne les touche pas)
+    stopForce(x, x_dot) {
+        const pen = Math.abs(x) - this.railLimit;
+        if (pen <= 0) return 0;
+        const s = Math.sign(x);
+        // L'amortisseur ne tire jamais le chariot vers la butee
+        return Math.min(0, -this.kStop * pen - this.cStop * x_dot * s) * s;
     }
 
-    // force : moteur (sature a fMax) ; hand : force exterieure de la main (non saturee)
-    step(force, integrator = 'rk4', hand = 0) {
-        this.lastForce = clamp(force, -this.fMax, this.fMax);
-        this.lastHand = hand;
-        const F = this.lastForce + hand;
+    // Equations de Lagrange avec forces generalisees :
+    //  (mc+mp) x'' + mp l cos th th'' = Qx + mp l th'^2 sin th
+    //  cos th x'' + Le th''           = g sin th - c/(mp l) th' + Qth/(mp l)
+    // Qx = moteur + frottements + butees + main (chariot) + main (bout de tige)
+    // Qth = couple de la main au bout de la tige (point a 2l du pivot)
+    derivatives(state) {
+        const [x, x_dot, theta, theta_dot] = state;
+        const S = Math.sin(theta), C = Math.cos(theta);
+        const [fx, fy] = this.input.tip;
 
-        if (integrator === 'rk4') this.rk4Step(F);
-        else this.eulerStep(F);
+        const Qx = this.motorForce(x_dot) - this.b * x_dot - this.coulomb * Math.tanh(x_dot / 0.01)
+                 + this.stopForce(x, x_dot) + this.input.cart + fx;
+        const Qth = 2 * this.l * (fx * C - fy * S);
+
+        const a11 = this.mc + this.mp, a12 = this.mp * this.l * C;
+        const a21 = C, a22 = this.lEq;
+        const v1 = Qx + this.mp * this.l * theta_dot * theta_dot * S;
+        const v2 = this.g * S - (this.c / (this.mp * this.l)) * theta_dot + Qth / (this.mp * this.l);
+
+        const det = a11 * a22 - a12 * a21; // = (mc+mp) Le - mp l cos^2 > 0
+        return [x_dot, (a22 * v1 - a12 * v2) / det, theta_dot, (-a21 * v1 + a11 * v2) / det];
+    }
+
+    rk4Step(h) {
+        const s = this.state;
+        const k1 = this.derivatives(s);
+        const k2 = this.derivatives(s.map((v, i) => v + h * k1[i] / 2));
+        const k3 = this.derivatives(s.map((v, i) => v + h * k2[i] / 2));
+        const k4 = this.derivatives(s.map((v, i) => v + h * k3[i]));
+        for (let i = 0; i < 4; i++) s[i] += h * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]) / 6;
+    }
+
+    eulerStep(h) {
+        const d = this.derivatives(this.state);
+        for (let i = 0; i < 4; i++) this.state[i] += h * d[i];
+    }
+
+    // cmd : tension (V) avec le modele moteur, sinon force (N)
+    // ext.cart : force exterieure sur le chariot (N) ; ext.tip : [fx, fy] au bout de la tige (N)
+    step(cmd, integrator = 'rk4', ext = {}) {
+        this.input = { cmd, cart: ext.cart || 0, tip: ext.tip || [0, 0] };
+
+        // Pres des butees, sous-pas pour integrer le choc raide sans instabilite
+        const nearStop = Math.abs(this.state[0]) > this.railLimit - 0.05;
+        const n = nearStop ? 8 : 1, h = this.dt / n;
+        for (let i = 0; i < n; i++) {
+            if (integrator === 'rk4') this.rk4Step(h);
+            else this.eulerStep(h);
+        }
 
         this.state[2] = wrapAngle(this.state[2]);
-
-        // Butees du rail : choc inelastique
-        if (Math.abs(this.state[0]) > this.railLimit) {
-            this.state[0] = Math.sign(this.state[0]) * this.railLimit;
-            this.state[1] = 0;
-        }
-
+        this.lastForce = this.motorForce(this.state[1]);
         this.t += this.dt;
     }
 
     reset(initialState = [0, 0, 0.1, 0]) {
         this.state = [...initialState];
         this.t = 0;
+        this.input = { cmd: 0, cart: 0, tip: [0, 0] };
         this.lastForce = 0;
     }
 
-    // Impulsion horizontale (N.s) appliquee au chariot
+    // Impulsion horizontale (N.s) sur le chariot : partagee avec le pendule via les equations
     applyImpulse(impulse) {
         this.state[1] += impulse / this.mc;
     }
 
     // Bilan des forces a l'instant courant (N), repere x vers la droite, y vers le haut.
-    // La force du pivot sur la tige vient de Newton applique au centre de masse G :
-    //   R = mp aG - mp g   avec   G = (x + l sin th, l cos th)
-    forces(F) {
-        const [, x_dot, theta, theta_dot] = this.state;
-        const hand = this.lastHand || 0;
-        const [, x_ddot, , theta_ddot] = this.derivatives(this.state, F + hand);
+    // Force du pivot sur la tige par Newton au centre de masse G (main au bout comprise) :
+    //   R + mp g + F_tip = mp aG
+    forces() {
+        const [x, x_dot, theta, theta_dot] = this.state;
+        const [, x_ddot, , theta_ddot] = this.derivatives(this.state);
         const S = Math.sin(theta), C = Math.cos(theta);
+        const [fx, fy] = this.input.tip;
         const aGx = x_ddot + this.l * (C * theta_ddot - S * theta_dot ** 2);
         const aGy = -this.l * (S * theta_ddot + C * theta_dot ** 2);
-        const Rx = this.mp * aGx;
-        const Ry = this.mp * aGy + this.mp * this.g;
+        const Rx = this.mp * aGx - fx;
+        const Ry = this.mp * aGy + this.mp * this.g - fy;
         return {
-            motor: F,
-            hand,
+            motor: this.motorForce(x_dot),
+            hand: this.input.cart,
+            tip: [fx, fy],
+            stop: this.stopForce(x, x_dot),
             weightPole: this.mp * this.g,
             weightCart: this.mc * this.g,
             pivot: [Rx, Ry],                       // force du chariot sur la tige
@@ -175,10 +205,10 @@ class PIDController {
         this.catchAngle = 0.4;   // |theta| sous lequel on passe en stabilisation (23 deg)
         this.dropAngle = 0.8;    // |theta| au-dela duquel on repasse en redressement
         this.swingUp = true;     // redressement automatique depuis la position basse
-        this.swingGain = 8;      // gain du pompage d'energie
-        this.swingAccel = 1.2;   // acceleration max du chariot en redressement (en g)
-        this.swingKx = 1.5;      // rappel du chariot vers le centre pendant le redressement
-        this.swingKv = 3.0;
+        this.swingGain = 12;     // gain du pompage d'energie
+        this.swingAccel = 0.5;   // acceleration max du chariot en redressement (en g)
+        this.swingKx = 5;        // rappel du chariot vers le centre pendant le redressement
+        this.swingKv = 3;
         this.swingMargin = 0.2;  // vise un peu plus que l'energie du sommet pour l'atteindre
         this.phase = 'swing';    // 'swing' (redressement) | 'balance' (stabilisation)
         this.plant = null;       // parametres physiques (masses, l, g) pour le redressement
@@ -346,7 +376,7 @@ class Sensors {
 }
 
 // ===== MODULE UI =====
-const SLIDERS = ['kp', 'ki', 'kd', 'kx', 'kv', 'mc', 'mp', 'l', 'b', 'c', 'g', 'fmax', 'dt',
+const SLIDERS = ['kp', 'ki', 'kd', 'kx', 'kv', 'mc', 'mp', 'l', 'b', 'c', 'g', 'vmax', 'rail', 'dt',
                  'noise', 'tau', 'ts', 'fs'];
 
 class UI {
@@ -387,8 +417,8 @@ class UI {
 
     refreshValue(name) {
         const v = parseFloat(this.$(`${name}-slider`).value);
-        const unit = { dt: ' ms', ts: ' ms', tau: ' ms', noise: ' mrad', fs: ' N' }[name];
-        this.$(`${name}-value`).textContent = unit ? `${+v.toFixed(2)}${unit}` : v.toFixed(2);
+        const unit = { dt: ' ms', ts: ' ms', tau: ' ms', noise: ' mrad', fs: ' N', vmax: ' V', rail: ' m' }[name];
+        this.$(`${name}-value`).textContent = unit ? `${+v.toFixed(2)}${unit}` : v.toFixed(name === 'c' ? 3 : 2);
     }
 
     getRealismParams() {
@@ -465,7 +495,8 @@ class UI {
 
     getSystemParams() {
         const v = (n) => parseFloat(this.$(`${n}-slider`).value);
-        return { mc: v('mc'), mp: v('mp'), l: v('l'), b: v('b'), c: v('c'), g: v('g'), fMax: v('fmax') };
+        return { mc: v('mc'), mp: v('mp'), l: v('l'), b: v('b'), c: v('c'), g: v('g'),
+                 vMax: v('vmax'), railLimit: v('rail') };
     }
 
     getSimulationParams() {
@@ -477,12 +508,16 @@ class UI {
 }
 
 // ===== MODULE ANIMATION AVEC INTERACTIVITE =====
+// Dimensions reelles du banc (m)
+const CART_W = 0.20, CART_H = 0.07, WHEEL_R = 0.018;
+
 const FORCE_SCALE = 4;     // px par newton
 const FORCE_MAX_PX = 220;  // au-dela, la fleche est tronquee (la valeur reste affichee)
 const FORCE_COLORS = {
     weight: '#d35400',   // poids
     motor: '#27ae60',    // moteur
-    hand: '#2c3e50',     // main (glisser le chariot)
+    hand: '#2c3e50',     // main (glisser le chariot ou la tige)
+    stop: '#c0392b',     // butee du rail
     normal: '#2980b9',   // reaction du rail
     pivot: '#16a085',    // force du pivot
     friction: '#7f8c8d'  // frottements
@@ -507,13 +542,14 @@ class Animation {
         this.mouseX = -1;
         this.mouseY = -1;
 
-        this.onCartDrag = null;
-        this.onPendulumDrag = null;
+        this.onDragStart = null;
         this.onDragEnd = null;
+        this.dragWorld = null;
 
         this.currentX = 0;
         this.currentTheta = 0;
-        this.currentL = 0.5;
+        this.currentL = 0.3;
+        this.railLimit = 0.6;   // course du centre du chariot (m), fixee par l'application
 
         this.setupInteraction();
     }
@@ -540,6 +576,11 @@ class Animation {
 
     cartPx() { return this.centerX + this.currentX * this.scale; }
 
+    // Pixels du canvas -> metres (origine : milieu du rail, hauteur du pivot)
+    toWorld(px, py) {
+        return { x: (px - this.centerX) / this.scale, y: (this.cartY - py) / this.scale };
+    }
+
     // Extremite de la tige (longueur totale 2l)
     bobPx() {
         const L = 2 * this.currentL * this.scale;
@@ -564,6 +605,8 @@ class Animation {
         else if (this.hitCart(x, y)) this.dragTarget = 'cart';
         else return;
         this.isDragging = true;
+        this.dragWorld = this.toWorld(x, y);
+        if (this.onDragStart) this.onDragStart(this.dragTarget, this.dragWorld);
         this.canvas.style.cursor = 'grabbing';
         this.mouseX = x; this.mouseY = y;
     }
@@ -574,11 +617,7 @@ class Animation {
             this.mouseX = x; this.mouseY = y;
             return;
         }
-        if (this.dragTarget === 'cart' && this.onCartDrag) {
-            this.onCartDrag((x - this.mouseX) / this.scale);
-        } else if (this.dragTarget === 'pendulum' && this.onPendulumDrag) {
-            this.onPendulumDrag(Math.atan2(x - this.cartPx(), this.cartY - y));
-        }
+        this.dragWorld = this.toWorld(x, y);
         this.mouseX = x; this.mouseY = y;
     }
 
@@ -586,15 +625,15 @@ class Animation {
         if (this.isDragging && this.onDragEnd) this.onDragEnd();
         this.isDragging = false;
         this.dragTarget = null;
+        this.dragWorld = null;
         this.canvas.style.cursor = 'default';
     }
 
-    draw(x, theta, l, force, targetX = null, forces = null) {
+    draw(x, theta, l, force, targetX = null, forces = null, grabOffset = 0) {
         this.currentX = x;
         this.currentTheta = theta;
         this.currentL = l;
-        // Echelle reduite si la tige ne tient pas au-dessus du chariot
-        this.scale = Math.min(150, (this.cartY - 30) / (2 * l));
+        this.layout(l);
 
         const ctx = this.ctx;
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -607,6 +646,7 @@ class Animation {
         this.drawCart(cartX);
         this.drawAngle(cartX, theta);
         this.drawPole(cartX);
+        this.drawHand(grabOffset);
         if (forces) {
             this.drawForceVectors(cartX, theta, forces);
             this.drawForceLegend();
@@ -615,7 +655,18 @@ class Animation {
         this.drawInstructions();
     }
 
-    // Longueur affichee proportionnelle a la racine de |F| : petites et grandes forces restent lisibles
+    // Echelle commune a tout le dessin : le rail complet tient en largeur, la tige en hauteur
+    layout(l) {
+        const W = this.canvas.width, H = this.canvas.height;
+        const half = this.railLimit + CART_W / 2;           // position des butees
+        this.scale = Math.min((W - 170) / (2 * half), (this.cartY - 40) / (2 * l));
+        this.cartWidth = CART_W * this.scale;
+        this.cartHeight = Math.max(14, CART_H * this.scale);
+        this.wheelRadius = Math.max(5, WHEEL_R * this.scale);
+        this.railY = this.cartY + this.cartHeight / 2 + this.wheelRadius;
+        this.stopPx = half * this.scale;
+    }
+
     // Longueur proportionnelle a la force : FORCE_SCALE px par newton
     static arrowLength(F) {
         return Math.min(FORCE_MAX_PX, FORCE_SCALE * Math.abs(F));
@@ -686,6 +737,14 @@ class Animation {
         ctx.fillStyle = C.normal;
         ctx.fillText(steady('force-N', () => `N ${Math.abs(f.normal).toFixed(1)} N`), cartX + this.cartWidth / 3 + 8, railY + nLen * 0.6 + 4);
 
+        // Main au bout de la tige
+        const tip = this.bobPx();
+        this.vector(tip.x, tip.y, f.tip[0], f.tip[1], C.hand, 'Main', 1);
+        // Butee : pousse le chariot vers l'interieur au contact
+        if (Math.abs(f.stop) > 0.05) {
+            const s = Math.sign(f.stop);
+            this.vector(cartX - s * this.cartWidth / 2, y, f.stop, 0, C.stop, 'Butée', 1);
+        }
         // Main qui tire le chariot (au-dessus du chariot)
         if (Math.abs(f.hand) > 0.05) {
             this.vector(cartX, y - this.cartHeight / 2 - 4, f.hand, 0, C.hand, 'Main', -1);
@@ -701,27 +760,10 @@ class Animation {
         }
     }
 
+    // Barre d'echelle des forces (la legende des couleurs est dans la page, sous la scene)
     drawForceLegend() {
-        const ctx = this.ctx, C = FORCE_COLORS;
-        const items = [
-            [C.weight, 'P, Pc : poids (tige, chariot)'],
-            [C.motor, 'F : force du moteur'],
-            [C.hand, 'Main : votre traction sur le chariot'],
-            [C.normal, 'N : réaction du rail'],
-            [C.pivot, 'R : force du pivot sur la tige'],
-            [C.friction, 'f : frottements du rail']
-        ];
+        const ctx = this.ctx;
         ctx.font = '12px sans-serif';
-        ctx.textAlign = 'left';
-        const x = 10, y0 = this.canvas.height - 12 - (items.length - 1) * 17;
-        items.forEach(([c, t], i) => {
-            ctx.fillStyle = c;
-            ctx.fillRect(x, y0 + i * 17 - 9, 14, 4);
-            ctx.fillStyle = '#2c3e50';
-            ctx.fillText(t, x + 20, y0 + i * 17 - 3);
-        });
-        ctx.fillStyle = '#7f8c8d';
-        ctx.textAlign = 'right';
         // Barre d'echelle : 10 N
         const bar = 10 * FORCE_SCALE, bx = this.canvas.width - 10 - bar, by = this.canvas.height - 30;
         ctx.strokeStyle = '#2c3e50';
@@ -741,23 +783,52 @@ class Animation {
     }
 
     drawRail() {
-        const ctx = this.ctx;
-        ctx.strokeStyle = '#34495e';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(50, this.railY);
-        ctx.lineTo(this.canvas.width - 50, this.railY);
-        ctx.stroke();
+        const ctx = this.ctx, cx = this.centerX, y = this.railY, sp = this.stopPx;
 
-        // Graduations tous les 0.5 m
+        // Courroie (moteur a gauche, poulie de renvoi a droite), accrochee au chariot
+        const pulleyR = 9, motorX = cx - sp - 34, idlerX = cx + sp + 22, beltY = y + 10;
+        ctx.strokeStyle = '#7f8c8d';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(motorX, beltY - pulleyR); ctx.lineTo(idlerX, beltY - pulleyR);
+        ctx.moveTo(motorX, beltY + pulleyR); ctx.lineTo(idlerX, beltY + pulleyR);
+        ctx.stroke();
+        ctx.fillStyle = '#95a5a6';
+        ctx.beginPath(); ctx.arc(idlerX, beltY, pulleyR, 0, 2 * Math.PI); ctx.fill();
+
+        // Moteur a courant continu
+        ctx.fillStyle = '#2c3e50';
+        ctx.fillRect(motorX - 30, beltY - 16, 30, 32);
+        ctx.fillStyle = '#95a5a6';
+        ctx.beginPath(); ctx.arc(motorX, beltY, pulleyR, 0, 2 * Math.PI); ctx.fill();
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('M', motorX - 15, beltY + 4);
+
+        // Rail
+        ctx.fillStyle = '#34495e';
+        ctx.fillRect(cx - sp - 10, y, 2 * sp + 20, 4);
+
+        // Butees (bloc + tampon caoutchouc)
+        for (const k of [-1, 1]) {
+            const ex = cx + k * sp;
+            ctx.fillStyle = '#2c3e50';
+            ctx.fillRect(k < 0 ? ex - 12 : ex + 4, y - 26, 8, 30);
+            ctx.fillStyle = '#e67e22';
+            ctx.fillRect(k < 0 ? ex - 4 : ex, y - 20, 4, 18);
+        }
+
+        // Graduations tous les 10 cm, etiquettes tous les 20 cm
         ctx.fillStyle = '#95a5a6';
         ctx.font = '11px sans-serif';
-        ctx.textAlign = 'center';
-        for (let m = -2; m <= 2; m += 0.5) {
-            const px = this.centerX + m * this.scale;
-            ctx.fillRect(px - 1, this.railY, 2, m % 1 === 0 ? 10 : 6);
-            if (m % 1 === 0) ctx.fillText(`${m} m`, px, this.railY + 24);
+        const n = Math.floor(this.railLimit * 10 + 1e-6);
+        for (let i = -n; i <= n; i++) {
+            const px = cx + i * 0.1 * this.scale;
+            ctx.fillRect(px - 0.5, y + 4, 1, i % 2 === 0 ? 8 : 5);
+            if (i % 2 === 0) ctx.fillText(`${(i / 10).toFixed(1)}`, px, y + 34);
         }
+        ctx.fillText('x (m)', cx + sp + 30, y + 34);
         ctx.textAlign = 'left';
     }
 
@@ -767,18 +838,46 @@ class Animation {
 
         ctx.fillStyle = hl ? '#2980b9' : '#3498db';
         ctx.fillRect(x - w / 2, y - h / 2, w, h);
-        if (hl) {
-            ctx.strokeStyle = '#1abc9c';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(x - w / 2, y - h / 2, w, h);
-        }
+        ctx.strokeStyle = hl ? '#1abc9c' : '#21618c';
+        ctx.lineWidth = hl ? 2 : 1;
+        ctx.strokeRect(x - w / 2, y - h / 2, w, h);
 
-        ctx.fillStyle = '#2c3e50';
+        // Roues qui tournent : angle = distance parcourue / rayon
+        const r = this.wheelRadius, rot = this.currentX / WHEEL_R;
         for (const dx of [-w / 3, w / 3]) {
+            const wx = x + dx, wy = y + h / 2;
+            ctx.fillStyle = '#2c3e50';
+            ctx.beginPath(); ctx.arc(wx, wy, r, 0, 2 * Math.PI); ctx.fill();
+            ctx.strokeStyle = '#bdc3c7';
+            ctx.lineWidth = 1.5;
             ctx.beginPath();
-            ctx.arc(x + dx, y + h / 2, this.wheelRadius, 0, 2 * Math.PI);
-            ctx.fill();
+            for (let k = 0; k < 3; k++) {
+                const a = rot + k * Math.PI / 3;
+                ctx.moveTo(wx - r * 0.8 * Math.cos(a), wy - r * 0.8 * Math.sin(a));
+                ctx.lineTo(wx + r * 0.8 * Math.cos(a), wy + r * 0.8 * Math.sin(a));
+            }
+            ctx.stroke();
         }
+    }
+
+    // Ligne elastique entre le point saisi et la souris (la "main")
+    drawHand(grabOffset) {
+        const w = this.dragWorld;
+        if (!w) return;
+        const ctx = this.ctx;
+        const from = this.dragTarget === 'cart'
+            ? { x: this.cartPx() + grabOffset * this.scale, y: this.cartY }
+            : this.bobPx();
+        const to = { x: this.centerX + w.x * this.scale, y: this.cartY - w.y * this.scale };
+        ctx.save();
+        ctx.strokeStyle = '#2c3e50';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(44,62,80,0.25)';
+        ctx.beginPath(); ctx.arc(to.x, to.y, 9, 0, 2 * Math.PI); ctx.fill();
+        ctx.restore();
     }
 
     // Angle theta : verticale de reference (haut) en pointilles + arc jusqu'a la tige
@@ -831,7 +930,9 @@ class Animation {
         ctx.font = 'bold 13px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(steady('theta-arc', () => `θ = ${(theta * 180 / Math.PI).toFixed(1)}°`), cartX + lr * Math.cos(mid), y + lr * Math.sin(mid));
+        // Etiquette gardee dans le canvas
+        const lx = clamp(cartX + lr * Math.cos(mid), 50, this.canvas.width - 50);
+        ctx.fillText(steady('theta-arc', () => `θ = ${(theta * 180 / Math.PI).toFixed(1)}°`), lx, y + lr * Math.sin(mid));
         ctx.restore();
     }
 
@@ -843,7 +944,7 @@ class Animation {
 
         // Tige homogene
         ctx.strokeStyle = hl ? '#c0392b' : '#e74c3c';
-        ctx.lineWidth = 9;
+        ctx.lineWidth = Math.max(4, 0.02 * this.scale); // tige de 2 cm
         ctx.lineCap = 'round';
         ctx.beginPath();
         ctx.moveTo(cartX, this.cartY);
@@ -914,6 +1015,9 @@ class Animation {
         ctx.fillText(steady('hud-x', () => `x = ${x.toFixed(3)} m`), 10, 25);
         ctx.fillText(steady('hud-th', () => `θ = ${theta.toFixed(3)} rad (${(theta * 180 / Math.PI).toFixed(1)}°)`), 10, 45);
         ctx.fillText(steady('hud-F', () => `F = ${F.toFixed(2)} N`), 10, 65);
+        if (this.voltage !== undefined) {
+            ctx.fillText(steady('hud-V', () => `V = ${this.voltage.toFixed(1)} V`), 10, 85);
+        }
     }
 
     drawInstructions() {
@@ -921,7 +1025,7 @@ class Animation {
         ctx.fillStyle = '#7f8c8d';
         ctx.font = '12px sans-serif';
         ctx.textAlign = 'right';
-        ['Glisser le chariot ou la masse', '← / → : pousser le chariot']
+        ['Saisir le chariot ou le bout de la tige', '← / → : pousser le chariot']
             .forEach((t, i) => ctx.fillText(t, this.canvas.width - 10, 20 + i * 15));
         ctx.textAlign = 'left';
     }
@@ -1139,8 +1243,8 @@ class ControlLoop {
         this.controller.plant = physics;
         this.active = true;      // false : controleur coupe, le pendule reste libre
         this.enabled = true;
-        this.ts = 0.01;
-        this.tau = 0.02;
+        this.ts = 0.005;   // periode d'echantillonnage (s)
+        this.tau = 0.005;  // constante de temps amplificateur + moteur (s)
         this.reset();
     }
 
@@ -1157,43 +1261,45 @@ class ControlLoop {
         this.sensors.reset();
         this.clock = 0;
         this.command = 0;
-        this.motorForce = 0;
+        this.voltage = 0;
     }
 
-    step(dt, xRef, push = 0, integrator = 'rk4', hand = null) {
+    // ext : forces exterieures (clavier / main) ; held : l'utilisateur tient le systeme
+    step(dt, xRef, ext = {}, integrator = 'rk4', held = false) {
         const p = this.physics;
 
-        // Chariot tenu a la main : le moteur est coupe, la physique continue
-        if (hand !== null) {
-            this.command = 0;
-            this.motorForce = 0;
-            p.step(push, integrator, hand);
+        // Amplificateur coupe (au repos ou tenu a la main) : le moteur n'agit plus
+        if (held || !this.active) {
+            this.command = this.voltage = 0;
+            p.motorModel = false;
+            p.step(0, integrator, ext);
             return;
         }
 
-        if (!this.active) {
-            this.command = 0;
-            this.motorForce = 0;
-            p.step(push, integrator);
-            return;
-        }
-
+        // Mode ideal : mesure parfaite, commande continue, source de force parfaite
         if (!this.enabled) {
+            p.motorModel = false;
             this.command = this.controller.compute(p.state, xRef, dt);
-            p.step(this.command + push, integrator);
+            p.step(this.command, integrator, ext);
             return;
         }
 
+        // Banc reel : calculateur echantillonne a Ts. Il calcule une force voulue F*,
+        // puis la tension V = (F* + beta x'_mesure) / alpha qui compense la force
+        // contre-electromotrice du moteur, saturee a +-Vmax.
+        p.motorModel = true;
         this.clock -= dt;
         if (this.clock <= 0) {
             const Ts = Math.max(this.ts, dt);
             this.clock += Ts;
             const measured = this.sensors.read(p.state, Ts);
-            this.command = clamp(this.controller.compute(measured, xRef, Ts), -p.fMax, p.fMax);
+            const Fwanted = this.controller.compute(measured, xRef, Ts);
+            this.command = clamp((Fwanted + p.beta * measured[1]) / p.alpha, -p.vMax, p.vMax);
         }
 
-        this.motorForce += (this.command - this.motorForce) * (this.tau > 0 ? 1 - Math.exp(-dt / this.tau) : 1);
-        p.step(this.motorForce + push, integrator);
+        // Amplificateur + inductance du moteur : retard du 1er ordre sur la tension
+        this.voltage += (this.command - this.voltage) * (this.tau > 0 ? 1 - Math.exp(-dt / this.tau) : 1);
+        p.step(this.voltage, integrator, ext);
     }
 }
 
@@ -1215,8 +1321,8 @@ class InvertedPendulumApp {
         this.accumulator = 0;
         this.pendingImpulseAt = null;
         this.keys = { left: false, right: false };
-        this.keyForce = 15; // N
-        this.handTargetX = null; // position visee par la main quand on tire le chariot
+        this.keyForce = 8; // N, poussee de la main au clavier
+        this.grabOffset = 0;
 
         this.bindUI();
         this.bindInteraction();
@@ -1239,23 +1345,44 @@ class InvertedPendulumApp {
         this.ui.onModeChange = () => this.reset();
     }
 
+    // La souris agit comme une main : un ressort amorti relie le point saisi a la souris.
+    // La simulation ne s'arrete jamais ; le moteur est coupe tant qu'on tient le systeme.
     bindInteraction() {
-        // Pendant un glissement la simulation est figee, puis repart a la relache
-        // Glisser le chariot : la souris le tire comme une main (ressort amorti vers la souris).
-        // La simulation continue, donc le pendule reagit aux accelerations du chariot.
-        this.animation.onCartDrag = (dx) => {
-            const lim = this.physics.railLimit;
-            if (this.handTargetX === null) this.handTargetX = this.physics.x;
-            this.handTargetX = clamp(this.handTargetX + dx, -lim, lim);
-        };
-        this.animation.onPendulumDrag = (theta) => {
-            this.physics.setState(this.physics.x, 0, theta, 0);
+        this.animation.onDragStart = (target, w) => {
+            // Decalage entre le point saisi et le centre du chariot
+            this.grabOffset = target === 'cart' ? w.x - this.physics.x : 0;
         };
         this.animation.onDragEnd = () => {
-            this.handTargetX = null;
             this.bench.reset();
             this.measuring = false;
         };
+    }
+
+    // Forces exterieures de l'utilisateur (clavier + main)
+    externalForces() {
+        const ext = { cart: 0, tip: [0, 0] };
+        if (this.keys.left) ext.cart -= this.keyForce;
+        if (this.keys.right) ext.cart += this.keyForce;
+
+        const a = this.animation, w = a.dragWorld, p = this.physics;
+        if (!w) return ext;
+        if (a.dragTarget === 'cart') {
+            // Main sur le chariot : ressort horizontal ~3 Hz, force limitee a 60 N
+            const M = p.mc + p.mp, om = 2 * Math.PI * 3;
+            const F = M * om * om * (w.x - this.grabOffset - p.x) - 2 * 0.8 * M * om * p.x_dot;
+            ext.cart += clamp(F, -60, 60);
+        } else if (a.dragTarget === 'pendulum') {
+            // Main au bout de la tige : ressort 2D vers la souris, force limitee a 30 N
+            const L = 2 * p.l, S = Math.sin(p.theta), C = Math.cos(p.theta);
+            const tip = [p.x + L * S, L * C];
+            const v = [p.x_dot + L * C * p.theta_dot, -L * S * p.theta_dot];
+            let fx = 150 * (w.x - tip[0]) - 6 * v[0];
+            let fy = 150 * (w.y - tip[1]) - 6 * v[1];
+            const n = Math.hypot(fx, fy);
+            if (n > 30) { fx *= 30 / n; fy *= 30 / n; }
+            ext.tip = [fx, fy];
+        }
+        return ext;
     }
 
     bindKeyboard() {
@@ -1349,18 +1476,13 @@ class InvertedPendulumApp {
         this.accumulator += Math.min((now - this.lastTime) / 1000, 0.1);
         this.lastTime = now;
 
-        // Seule la masse tenue a la main fige la simulation ; le chariot tire reste simule
-        if (this.animation.dragTarget !== 'pendulum') {
-            const r = this.ui.getRealismParams();
-            this.physics.updateParams({ ...this.ui.getSystemParams(), coulomb: r.enabled ? r.fs : 0 });
-            this.controller.setGains(this.ui.getGains());
-            this.bench.configure(r);
-            while (this.accumulator >= sim.dt) {
-                this.update(sim);
-                this.accumulator -= sim.dt;
-            }
-        } else {
-            this.accumulator = 0;
+        const r = this.ui.getRealismParams();
+        this.physics.updateParams({ ...this.ui.getSystemParams(), coulomb: r.enabled ? r.fs : 0 });
+        this.controller.setGains(this.ui.getGains());
+        this.bench.configure(r);
+        while (this.accumulator >= sim.dt) {
+            this.update(sim);
+            this.accumulator -= sim.dt;
         }
 
         this.render();
@@ -1378,11 +1500,7 @@ class InvertedPendulumApp {
             this.performance.t0 = p.t;
         }
 
-        let push = 0;
-        if (this.keys.left) push -= this.keyForce;
-        if (this.keys.right) push += this.keyForce;
-
-        this.bench.step(sim.dt, this.targetX, push, sim.integrator, this.handForce());
+        this.bench.step(sim.dt, this.targetX, this.externalForces(), sim.integrator, this.animation.isDragging);
 
         // Les indicateurs mesurent la stabilisation : ils demarrent quand le pendule est rattrape en haut
         const balancing = this.bench.active && this.controller.phase === 'balance';
@@ -1398,15 +1516,7 @@ class InvertedPendulumApp {
         }
         this.anglePlot.addPoint(p.t, p.theta);
         this.positionPlot.addPoint(p.t, p.x);
-        this.smoothForces(p.forces(p.lastForce), sim.dt);
-    }
-
-    // Main : ressort-amortisseur entre le chariot et la souris (frequence ~4 Hz, bien amorti)
-    handForce() {
-        if (this.handTargetX === null) return null;
-        const p = this.physics, M = p.mc + p.mp;
-        const w = 2 * Math.PI * 4;
-        return M * w * w * (this.handTargetX - p.x) - 2 * 0.8 * M * w * p.x_dot;
+        this.smoothForces(p.forces(), sim.dt);
     }
 
     // Filtre passe-bas (constante 0.1 s) sur les forces affichees : le bruit des capteurs fait
@@ -1414,30 +1524,32 @@ class InvertedPendulumApp {
     smoothForces(f, dt) {
         const d = this.forceDisplay;
         if (!d) {
-            this.forceDisplay = { ...f, pivot: [...f.pivot] };
+            this.forceDisplay = { ...f, pivot: [...f.pivot], tip: [...f.tip] };
             return;
         }
         const a = 1 - Math.exp(-dt / 0.1);
-        for (const k of ['motor', 'hand', 'weightPole', 'weightCart', 'normal', 'friction']) d[k] += a * (f[k] - d[k]);
-        d.pivot[0] += a * (f.pivot[0] - d.pivot[0]);
-        d.pivot[1] += a * (f.pivot[1] - d.pivot[1]);
+        for (const k of ['motor', 'hand', 'stop', 'weightPole', 'weightCart', 'normal', 'friction']) d[k] += a * (f[k] - d[k]);
+        for (const k of ['pivot', 'tip']) for (const i of [0, 1]) d[k][i] += a * (f[k][i] - d[k][i]);
     }
 
     render() {
         const p = this.physics;
         const showForces = document.getElementById('show-forces').checked;
-        if (!this.forceDisplay || this.animation.dragTarget === 'pendulum') {
-            this.forceDisplay = null;
-            this.smoothForces(p.forces(p.lastForce), 0);
-        }
+        document.getElementById('force-legend').hidden = !showForces;
+        if (!this.forceDisplay) this.smoothForces(p.forces(), 0);
         const motor = this.forceDisplay.motor;
+        this.animation.railLimit = p.railLimit;
+        this.animation.voltage = p.motorModel ? this.bench.voltage : undefined;
         this.animation.draw(p.x, p.theta, p.l, motor, this.ui.mode === 'project' ? this.targetX : null,
-                            showForces ? this.forceDisplay : null);
+                            showForces ? this.forceDisplay : null, this.grabOffset);
         this.anglePlot.draw();
         this.positionPlot.draw();
         const m = this.performance.getMetrics(motor);
         if (!this.measuring) m.angleStatus = null;
-        if (!this.bench.active) {
+        if (this.animation.isDragging) {
+            m.systemStatus = 'Tenu à la main';
+            m.overallStatus = null;
+        } else if (!this.bench.active) {
             m.systemStatus = 'Au repos';
             m.overallStatus = null;
         } else if (this.controller.phase === 'swing') {

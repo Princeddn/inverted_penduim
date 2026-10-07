@@ -299,3 +299,25 @@ canvas {
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
 }
+
+/* Legende des forces, sous la scene */
+.force-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+    margin: -10px 0 20px;
+    font-size: 0.85em;
+    color: #555;
+}
+
+.force-legend i {
+    display: inline-block;
+    width: 14px;
+    height: 4px;
+    margin-right: 6px;
+    vertical-align: middle;
+}
+
+.force-legend[hidden] {
+    display: none;
+}
