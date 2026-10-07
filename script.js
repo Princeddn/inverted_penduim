@@ -454,6 +454,8 @@ class UI {
 }
 
 // ===== MODULE ANIMATION AVEC INTERACTIVITE =====
+const FORCE_SCALE = 4;     // px par newton
+const FORCE_MAX_PX = 220;  // au-dela, la fleche est tronquee (la valeur reste affichee)
 const FORCE_COLORS = {
     weight: '#d35400',   // poids
     motor: '#27ae60',    // moteur
@@ -590,13 +592,14 @@ class Animation {
     }
 
     // Longueur affichee proportionnelle a la racine de |F| : petites et grandes forces restent lisibles
+    // Longueur proportionnelle a la force : FORCE_SCALE px par newton
     static arrowLength(F) {
-        return Math.min(120, 18 * Math.sqrt(Math.abs(F)));
+        return Math.min(FORCE_MAX_PX, FORCE_SCALE * Math.abs(F));
     }
 
     // Fleche partant de (x0, y0) dans la direction (ux, uy) (repere canvas), de longueur len
     arrow(x0, y0, ux, uy, len, color, label, labelSide = 1) {
-        if (len < 4) return;
+        if (len < 1.5) return;
         const ctx = this.ctx;
         const x1 = x0 + ux * len, y1 = y0 + uy * len;
         ctx.strokeStyle = ctx.fillStyle = color;
@@ -689,7 +692,21 @@ class Animation {
         });
         ctx.fillStyle = '#7f8c8d';
         ctx.textAlign = 'right';
-        ctx.fillText('Longueur des flèches ∝ √|F|', this.canvas.width - 10, this.canvas.height - 12);
+        // Barre d'echelle : 10 N
+        const bar = 10 * FORCE_SCALE, bx = this.canvas.width - 10 - bar, by = this.canvas.height - 30;
+        ctx.strokeStyle = '#2c3e50';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(bx, by - 4); ctx.lineTo(bx, by + 4);
+        ctx.moveTo(bx, by); ctx.lineTo(bx + bar, by);
+        ctx.moveTo(bx + bar, by - 4); ctx.lineTo(bx + bar, by + 4);
+        ctx.stroke();
+        ctx.fillStyle = '#2c3e50';
+        ctx.textAlign = 'center';
+        ctx.fillText('10 N', bx + bar / 2, by - 8);
+        ctx.fillStyle = '#7f8c8d';
+        ctx.textAlign = 'right';
+        ctx.fillText('Longueur des flèches proportionnelle à la force', this.canvas.width - 10, this.canvas.height - 10);
         ctx.textAlign = 'left';
     }
 
@@ -774,7 +791,11 @@ class Animation {
 
         // Etiquette au milieu de l'arc ; pour un petit angle, de l'autre cote de la verticale
         // pour ne pas chevaucher la tige
-        const mid = up + (Math.abs(theta) > 0.8 ? theta / 2 : -Math.sign(theta || 1) * 0.45);
+        // Hysteresis : le cote ne change que si theta depasse nettement 0, sinon l'etiquette
+        // sauterait d'un cote a l'autre a chaque petite oscillation
+        if (Math.abs(theta) > 0.05) this.angleLabelSide = -Math.sign(theta);
+        const side = this.angleLabelSide || 1;
+        const mid = up + (Math.abs(theta) > 0.8 ? theta / 2 : side * 0.45);
         const lr = r + 22 + 30 * Math.abs(Math.cos(mid)); // s'eloigne du chariot quand l'etiquette est laterale
         ctx.fillStyle = '#8e44ad';
         ctx.font = 'bold 13px sans-serif';
@@ -1226,6 +1247,7 @@ class InvertedPendulumApp {
         this.bench.reset();
         this.bench.active = scenario !== 'swingup';
         this.measuring = false;
+        this.forceDisplay = null;
         this.performance.reset(this.ui.mode, 0);
         this.performance.t0 = 0;
         this.pendingImpulseAt = scenario === 'impulse' ? 1.0 : null;
@@ -1316,16 +1338,36 @@ class InvertedPendulumApp {
         }
         this.anglePlot.addPoint(p.t, p.theta);
         this.positionPlot.addPoint(p.t, p.x);
+        this.smoothForces(p.forces(p.lastForce), sim.dt);
+    }
+
+    // Filtre passe-bas (constante 0.1 s) sur les forces affichees : le bruit des capteurs fait
+    // varier la commande a chaque echantillon, ce qui ferait clignoter fleches et valeurs.
+    smoothForces(f, dt) {
+        const d = this.forceDisplay;
+        if (!d) {
+            this.forceDisplay = { ...f, pivot: [...f.pivot] };
+            return;
+        }
+        const a = 1 - Math.exp(-dt / 0.1);
+        for (const k of ['motor', 'weightPole', 'weightCart', 'normal', 'friction']) d[k] += a * (f[k] - d[k]);
+        d.pivot[0] += a * (f.pivot[0] - d.pivot[0]);
+        d.pivot[1] += a * (f.pivot[1] - d.pivot[1]);
     }
 
     render() {
         const p = this.physics;
         const showForces = document.getElementById('show-forces').checked;
-        this.animation.draw(p.x, p.theta, p.l, p.lastForce, this.ui.mode === 'project' ? this.targetX : null,
-                            showForces ? p.forces(p.lastForce) : null);
+        if (!this.forceDisplay || this.animation.isDragging) {
+            this.forceDisplay = null;
+            this.smoothForces(p.forces(p.lastForce), 0);
+        }
+        const motor = this.forceDisplay.motor;
+        this.animation.draw(p.x, p.theta, p.l, motor, this.ui.mode === 'project' ? this.targetX : null,
+                            showForces ? this.forceDisplay : null);
         this.anglePlot.draw();
         this.positionPlot.draw();
-        const m = this.performance.getMetrics(p.lastForce);
+        const m = this.performance.getMetrics(motor);
         if (!this.measuring) m.angleStatus = null;
         if (!this.bench.active) {
             m.systemStatus = 'Au repos';
