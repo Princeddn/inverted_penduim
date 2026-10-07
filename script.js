@@ -96,9 +96,11 @@ class Physics {
         for (let i = 0; i < 4; i++) this.state[i] += this.dt * d[i];
     }
 
-    step(force, integrator = 'rk4') {
-        const F = clamp(force, -this.fMax, this.fMax);
-        this.lastForce = F;
+    // force : moteur (sature a fMax) ; hand : force exterieure de la main (non saturee)
+    step(force, integrator = 'rk4', hand = 0) {
+        this.lastForce = clamp(force, -this.fMax, this.fMax);
+        this.lastHand = hand;
+        const F = this.lastForce + hand;
 
         if (integrator === 'rk4') this.rk4Step(F);
         else this.eulerStep(F);
@@ -130,7 +132,8 @@ class Physics {
     //   R = mp aG - mp g   avec   G = (x + l sin th, l cos th)
     forces(F) {
         const [, x_dot, theta, theta_dot] = this.state;
-        const [, x_ddot, , theta_ddot] = this.derivatives(this.state, F);
+        const hand = this.lastHand || 0;
+        const [, x_ddot, , theta_ddot] = this.derivatives(this.state, F + hand);
         const S = Math.sin(theta), C = Math.cos(theta);
         const aGx = x_ddot + this.l * (C * theta_ddot - S * theta_dot ** 2);
         const aGy = -this.l * (S * theta_ddot + C * theta_dot ** 2);
@@ -138,6 +141,7 @@ class Physics {
         const Ry = this.mp * aGy + this.mp * this.g;
         return {
             motor: F,
+            hand,
             weightPole: this.mp * this.g,
             weightCart: this.mc * this.g,
             pivot: [Rx, Ry],                       // force du chariot sur la tige
@@ -478,6 +482,7 @@ const FORCE_MAX_PX = 220;  // au-dela, la fleche est tronquee (la valeur reste a
 const FORCE_COLORS = {
     weight: '#d35400',   // poids
     motor: '#27ae60',    // moteur
+    hand: '#2c3e50',     // main (glisser le chariot)
     normal: '#2980b9',   // reaction du rail
     pivot: '#16a085',    // force du pivot
     friction: '#7f8c8d'  // frottements
@@ -681,6 +686,10 @@ class Animation {
         ctx.fillStyle = C.normal;
         ctx.fillText(steady('force-N', () => `N ${Math.abs(f.normal).toFixed(1)} N`), cartX + this.cartWidth / 3 + 8, railY + nLen * 0.6 + 4);
 
+        // Main qui tire le chariot (au-dessus du chariot)
+        if (Math.abs(f.hand) > 0.05) {
+            this.vector(cartX, y - this.cartHeight / 2 - 4, f.hand, 0, C.hand, 'Main', -1);
+        }
         if (Math.abs(f.motor) > 0.05) {
             const s = Math.sign(f.motor);
             this.vector(cartX + s * this.cartWidth / 2, y - 6, f.motor, 0, C.motor, 'F', -s);
@@ -697,6 +706,7 @@ class Animation {
         const items = [
             [C.weight, 'P, Pc : poids (tige, chariot)'],
             [C.motor, 'F : force du moteur'],
+            [C.hand, 'Main : votre traction sur le chariot'],
             [C.normal, 'N : réaction du rail'],
             [C.pivot, 'R : force du pivot sur la tige'],
             [C.friction, 'f : frottements du rail']
@@ -1150,8 +1160,16 @@ class ControlLoop {
         this.motorForce = 0;
     }
 
-    step(dt, xRef, push = 0, integrator = 'rk4') {
+    step(dt, xRef, push = 0, integrator = 'rk4', hand = null) {
         const p = this.physics;
+
+        // Chariot tenu a la main : le moteur est coupe, la physique continue
+        if (hand !== null) {
+            this.command = 0;
+            this.motorForce = 0;
+            p.step(push, integrator, hand);
+            return;
+        }
 
         if (!this.active) {
             this.command = 0;
@@ -1198,6 +1216,7 @@ class InvertedPendulumApp {
         this.pendingImpulseAt = null;
         this.keys = { left: false, right: false };
         this.keyForce = 15; // N
+        this.handTargetX = null; // position visee par la main quand on tire le chariot
 
         this.bindUI();
         this.bindInteraction();
@@ -1222,14 +1241,18 @@ class InvertedPendulumApp {
 
     bindInteraction() {
         // Pendant un glissement la simulation est figee, puis repart a la relache
+        // Glisser le chariot : la souris le tire comme une main (ressort amorti vers la souris).
+        // La simulation continue, donc le pendule reagit aux accelerations du chariot.
         this.animation.onCartDrag = (dx) => {
             const lim = this.physics.railLimit;
-            this.physics.setState(clamp(this.physics.x + dx, -lim, lim), 0, this.physics.theta, 0);
+            if (this.handTargetX === null) this.handTargetX = this.physics.x;
+            this.handTargetX = clamp(this.handTargetX + dx, -lim, lim);
         };
         this.animation.onPendulumDrag = (theta) => {
             this.physics.setState(this.physics.x, 0, theta, 0);
         };
         this.animation.onDragEnd = () => {
+            this.handTargetX = null;
             this.bench.reset();
             this.measuring = false;
         };
@@ -1326,7 +1349,8 @@ class InvertedPendulumApp {
         this.accumulator += Math.min((now - this.lastTime) / 1000, 0.1);
         this.lastTime = now;
 
-        if (!this.animation.isDragging) {
+        // Seule la masse tenue a la main fige la simulation ; le chariot tire reste simule
+        if (this.animation.dragTarget !== 'pendulum') {
             const r = this.ui.getRealismParams();
             this.physics.updateParams({ ...this.ui.getSystemParams(), coulomb: r.enabled ? r.fs : 0 });
             this.controller.setGains(this.ui.getGains());
@@ -1358,7 +1382,7 @@ class InvertedPendulumApp {
         if (this.keys.left) push -= this.keyForce;
         if (this.keys.right) push += this.keyForce;
 
-        this.bench.step(sim.dt, this.targetX, push, sim.integrator);
+        this.bench.step(sim.dt, this.targetX, push, sim.integrator, this.handForce());
 
         // Les indicateurs mesurent la stabilisation : ils demarrent quand le pendule est rattrape en haut
         const balancing = this.bench.active && this.controller.phase === 'balance';
@@ -1377,6 +1401,14 @@ class InvertedPendulumApp {
         this.smoothForces(p.forces(p.lastForce), sim.dt);
     }
 
+    // Main : ressort-amortisseur entre le chariot et la souris (frequence ~4 Hz, bien amorti)
+    handForce() {
+        if (this.handTargetX === null) return null;
+        const p = this.physics, M = p.mc + p.mp;
+        const w = 2 * Math.PI * 4;
+        return M * w * w * (this.handTargetX - p.x) - 2 * 0.8 * M * w * p.x_dot;
+    }
+
     // Filtre passe-bas (constante 0.1 s) sur les forces affichees : le bruit des capteurs fait
     // varier la commande a chaque echantillon, ce qui ferait clignoter fleches et valeurs.
     smoothForces(f, dt) {
@@ -1386,7 +1418,7 @@ class InvertedPendulumApp {
             return;
         }
         const a = 1 - Math.exp(-dt / 0.1);
-        for (const k of ['motor', 'weightPole', 'weightCart', 'normal', 'friction']) d[k] += a * (f[k] - d[k]);
+        for (const k of ['motor', 'hand', 'weightPole', 'weightCart', 'normal', 'friction']) d[k] += a * (f[k] - d[k]);
         d.pivot[0] += a * (f.pivot[0] - d.pivot[0]);
         d.pivot[1] += a * (f.pivot[1] - d.pivot[1]);
     }
@@ -1394,7 +1426,7 @@ class InvertedPendulumApp {
     render() {
         const p = this.physics;
         const showForces = document.getElementById('show-forces').checked;
-        if (!this.forceDisplay || this.animation.isDragging) {
+        if (!this.forceDisplay || this.animation.dragTarget === 'pendulum') {
             this.forceDisplay = null;
             this.smoothForces(p.forces(p.lastForce), 0);
         }
