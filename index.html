@@ -120,6 +120,33 @@
                 </div>
                 <p style="font-size:0.85em;color:#7f8c8d">Après un changement de paramètres, cliquez sur « Auto-réglage ».</p>
             </div>
+            <div class="control-group">
+                <h3>Effets réels</h3>
+                <label style="display:flex;gap:8px;align-items:center;margin-bottom:12px">
+                    <input type="checkbox" id="realism" checked> Simuler un banc réel
+                </label>
+                <div class="param-row">
+                    <label for="noise-slider">Bruit capteur</label>
+                    <input type="range" id="noise-slider" min="0" max="10" step="0.5" value="2">
+                    <span class="value" id="noise-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="ts-slider">Période Ts</label>
+                    <input type="range" id="ts-slider" min="1" max="30" step="1" value="10">
+                    <span class="value" id="ts-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="tau-slider">Retard moteur</label>
+                    <input type="range" id="tau-slider" min="0" max="80" step="1" value="20">
+                    <span class="value" id="tau-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="fs-slider">Frottement sec</label>
+                    <input type="range" id="fs-slider" min="0" max="3" step="0.1" value="0.5">
+                    <span class="value" id="fs-value"></span>
+                </div>
+                <p style="font-size:0.85em;color:#7f8c8d">Encodeurs 4096 pts/tour et 0,1 mm, vitesses estimées par dérivée filtrée : le contrôleur ne voit jamais l'état exact.</p>
+            </div>
         </aside>
 
         <section class="simulation-area">
@@ -160,11 +187,13 @@
     <section class="readme-section">
         <h2>Modèle et commande</h2>
         <p>État : position du chariot <em>x</em>, angle <em>θ</em> mesuré depuis la verticale haute (θ &gt; 0 vers la droite).</p>
-        <div class="equation">(m<sub>c</sub>+m<sub>p</sub>) ẍ + m<sub>p</sub> l cos θ θ̈ = F − b ẋ + m<sub>p</sub> l θ̇² sin θ</div>
-        <div class="equation">cos θ ẍ + l θ̈ = g sin θ − c/(m<sub>p</sub> l) θ̇</div>
+        <div class="equation">(m<sub>c</sub>+m<sub>p</sub>) ẍ + m<sub>p</sub> l cos θ θ̈ = F − b ẋ − F<sub>s</sub> sgn ẋ + m<sub>p</sub> l θ̇² sin θ</div>
+        <div class="equation">cos θ ẍ + (4l/3) θ̈ = g sin θ − c/(m<sub>p</sub> l) θ̇</div>
         <p>Commande (saturée à ±F<sub>max</sub>) :</p>
         <div class="equation">F = K<sub>p</sub> θ + K<sub>i</sub> ∫θ dt + K<sub>d</sub> θ̇ + K<sub>x</sub> (x − x<sub>ref</sub>) + K<sub>v</sub> ẋ</div>
         <ul>
+            <li>Le pendule est une tige homogène de longueur 2l (point blanc = centre de masse), d'inertie m<sub>p</sub>l²/3.</li>
+            <li>Mode « banc réel » : commande numérique échantillonnée à Ts, moteur du 1er ordre, capteurs bruités et quantifiés, frottement sec du chariot.</li>
             <li>Les gains sont positifs : pour rattraper le pendule, le chariot doit aller <strong>dans le sens</strong> de l'inclinaison.</li>
             <li>L'auto-réglage linéarise le système autour de θ = 0 et place les pôles (Ackermann) : 2 pôles lents pour la position, 2 rapides pour l'angle.</li>
             <li>Au-delà de |θ| = 90°, le contrôleur considère le pendule tombé et coupe la force.</li>

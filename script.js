@@ -24,6 +24,7 @@ class Physics {
         this.g = 9.81;      // gravite (m/s2)
         this.fMax = 50;     // saturation de l'actionneur (N)
         this.railLimit = 2.2; // demi-longueur du rail (m)
+        this.coulomb = 0;   // frottement sec du chariot (N)
         Object.assign(this, params);
 
         this.state = [0, 0, 0.1, 0]; // [x, x_dot, theta, theta_dot]
@@ -36,9 +37,13 @@ class Physics {
         Object.assign(this, params);
     }
 
-    // Equations de Lagrange (masse ponctuelle a la distance l) :
-    //  (mc+mp) x'' + mp l cos(th) th'' = F - b x' + mp l th'^2 sin(th)
-    //  cos(th) x'' + l th''           = g sin(th) - c/(mp l) th'
+    // Le pendule est une tige homogene de longueur 2l (centre de masse a l du pivot),
+    // inertie propre I = mp l^2 / 3, donc longueur equivalente Le = l + I/(mp l) = 4l/3.
+    get lEq() { return 4 * this.l / 3; }
+
+    // Equations de Lagrange :
+    //  (mc+mp) x'' + mp l cos(th) th'' = F - b x' - Fs sgn(x') + mp l th'^2 sin(th)
+    //  cos(th) x'' + Le th''           = g sin(th) - c/(mp l) th'
     derivatives(state, F) {
         const [, x_dot, theta, theta_dot] = state;
         const S = Math.sin(theta);
@@ -47,12 +52,14 @@ class Physics {
         const a11 = this.mc + this.mp;
         const a12 = this.mp * this.l * C;
         const a21 = C;
-        const a22 = this.l;
+        const a22 = this.lEq;
 
-        const v1 = F - this.b * x_dot + this.mp * this.l * theta_dot * theta_dot * S;
+        // Frottement sec lisse (tanh) pour rester integrable
+        const dry = this.coulomb * Math.tanh(x_dot / 0.01);
+        const v1 = F - this.b * x_dot - dry + this.mp * this.l * theta_dot * theta_dot * S;
         const v2 = this.g * S - (this.c / (this.mp * this.l)) * theta_dot;
 
-        // det = l (mc + mp sin^2) > 0 toujours
+        // det = (mc+mp) Le - mp l cos^2 > 0 toujours
         const det = a11 * a22 - a12 * a21;
         const x_ddot = (a22 * v1 - a12 * v2) / det;
         const theta_ddot = (-a21 * v1 + a11 * v2) / det;
@@ -157,20 +164,22 @@ class PIDController {
     // speed > 1 = reponse plus rapide (et forces plus grandes).
     static autoTune(p, speed = 1) {
         const { mc, mp, l, b, c, g } = p;
+        const M = mc + mp, Le = 4 * l / 3;
         const cp = c / (mp * l);
+        const det = M * Le - mp * l;
         const A = [
             [0, 1, 0, 0],
-            [0, -b / mc, -mp * g / mc, mp * cp / mc],
+            [0, -b * Le / det, -mp * l * g / det, mp * l * cp / det],
             [0, 0, 0, 1],
-            [0, b / (l * mc), (mc + mp) * g / (l * mc), -(mc + mp) * cp / (l * mc)]
+            [0, b / det, M * g / det, -M * cp / det]
         ];
-        const B = [0, 1 / mc, 0, -1 / (l * mc)];
+        const B = [0, Le / det, 0, -1 / det];
         const mul = (X, Y) => X.map(r => Y[0].map((_, j) => r.reduce((s, v, k) => s + v * Y[k][j], 0)));
         const mv = (X, v) => X.map(r => r.reduce((s, a, k) => s + a * v[k], 0));
         const I = [0, 1, 2, 3].map(i => [0, 1, 2, 3].map(j => (i === j ? 1 : 0)));
 
         // 2 poles lents (position) + 2 poles rapides (angle) lies a la pulsation propre
-        const w0 = Math.sqrt(Math.abs(g) * (mc + mp) / (mc * l)) || 1;
+        const w0 = Math.sqrt(Math.abs(g) * M / det) || 1; // pole instable en boucle ouverte
         const poles = [-1.8 * speed, -2.4 * speed, -1.4 * w0 * speed, -1.6 * w0 * speed];
 
         // Polynome caracteristique desire
@@ -192,18 +201,18 @@ class PIDController {
         // Commandabilite : on resout C' y = e4 (Gauss-Jordan), puis K = y' phi(A)
         const cols = [B];
         for (let k = 1; k < 4; k++) cols.push(mv(A, cols[k - 1]));
-        const M = [0, 1, 2, 3].map(i => [...cols[i], i === 3 ? 1 : 0]);
+        const G = [0, 1, 2, 3].map(i => [...cols[i], i === 3 ? 1 : 0]);
         for (let i = 0; i < 4; i++) {
             let piv = i;
-            for (let r = i + 1; r < 4; r++) if (Math.abs(M[r][i]) > Math.abs(M[piv][i])) piv = r;
-            [M[i], M[piv]] = [M[piv], M[i]];
+            for (let r = i + 1; r < 4; r++) if (Math.abs(G[r][i]) > Math.abs(G[piv][i])) piv = r;
+            [G[i], G[piv]] = [G[piv], G[i]];
             for (let r = 0; r < 4; r++) {
                 if (r === i) continue;
-                const f = M[r][i] / M[i][i];
-                for (let k = i; k < 5; k++) M[r][k] -= f * M[i][k];
+                const f = G[r][i] / G[i][i];
+                for (let k = i; k < 5; k++) G[r][k] -= f * G[i][k];
             }
         }
-        const y = M.map((r, i) => r[4] / r[i]);
+        const y = G.map((r, i) => r[4] / r[i]);
         const K = [0, 1, 2, 3].map(j => y.reduce((s, v, k) => s + v * phi[k][j], 0));
 
         // F = -K s
@@ -215,8 +224,53 @@ class PIDController {
     }
 }
 
+// ===== MODULE CAPTEURS =====
+// Un vrai banc ne mesure que x et theta (encodeurs), avec bruit et quantification.
+// Les vitesses sont estimees par difference finie filtree (passe-bas 1er ordre).
+class Sensors {
+    constructor() {
+        this.enabled = true;
+        this.noiseTheta = 0.002;              // ecart-type du bruit angulaire (rad)
+        this.qTheta = 2 * Math.PI / 4096;     // encodeur 4096 points/tour
+        this.qX = 0.0001;                     // encodeur lineaire 0.1 mm
+        this.cutoffHz = 25;                   // filtre des vitesses estimees
+        this.reset();
+    }
+
+    reset() {
+        this.prev = null;
+        this.vx = 0;
+        this.vth = 0;
+    }
+
+    static gauss() {
+        let u = 0, v = 0;
+        while (u === 0) u = Math.random();
+        while (v === 0) v = Math.random();
+        return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    }
+
+    read(state, Ts) {
+        if (!this.enabled) return [...state];
+
+        const [x, , th] = state;
+        const q = (v, step) => Math.round(v / step) * step;
+        const xm = q(x + Sensors.gauss() * this.noiseTheta * 0.5, this.qX);
+        const thm = q(th + Sensors.gauss() * this.noiseTheta, this.qTheta);
+
+        if (this.prev) {
+            const a = Ts / (Ts + 1 / (2 * Math.PI * this.cutoffHz));
+            this.vx += a * ((xm - this.prev[0]) / Ts - this.vx);
+            this.vth += a * (wrapAngle(thm - this.prev[1]) / Ts - this.vth);
+        }
+        this.prev = [xm, thm];
+        return [xm, this.vx, thm, this.vth];
+    }
+}
+
 // ===== MODULE UI =====
-const SLIDERS = ['kp', 'ki', 'kd', 'kx', 'kv', 'mc', 'mp', 'l', 'b', 'c', 'g', 'fmax', 'dt'];
+const SLIDERS = ['kp', 'ki', 'kd', 'kx', 'kv', 'mc', 'mp', 'l', 'b', 'c', 'g', 'fmax', 'dt',
+                 'noise', 'tau', 'ts', 'fs'];
 
 class UI {
     constructor() {
@@ -256,7 +310,19 @@ class UI {
 
     refreshValue(name) {
         const v = parseFloat(this.$(`${name}-slider`).value);
-        this.$(`${name}-value`).textContent = name === 'dt' ? `${v} ms` : v.toFixed(2);
+        const unit = { dt: ' ms', ts: ' ms', tau: ' ms', noise: ' mrad', fs: ' N' }[name];
+        this.$(`${name}-value`).textContent = unit ? `${+v.toFixed(2)}${unit}` : v.toFixed(2);
+    }
+
+    getRealismParams() {
+        const v = (n) => parseFloat(this.$(`${n}-slider`).value);
+        return {
+            enabled: this.$('realism').checked,
+            noise: v('noise') / 1000,   // mrad -> rad
+            tau: v('tau') / 1000,       // ms -> s
+            ts: v('ts') / 1000,         // ms -> s
+            fs: v('fs')
+        };
     }
 
     setMode(mode) {
@@ -380,8 +446,9 @@ class Animation {
 
     cartPx() { return this.centerX + this.currentX * this.scale; }
 
+    // Extremite de la tige (longueur totale 2l)
     bobPx() {
-        const L = this.currentL * this.scale;
+        const L = 2 * this.currentL * this.scale;
         return {
             x: this.cartPx() + L * Math.sin(this.currentTheta),
             y: this.cartY - L * Math.cos(this.currentTheta)
@@ -432,6 +499,8 @@ class Animation {
         this.currentX = x;
         this.currentTheta = theta;
         this.currentL = l;
+        // Echelle reduite si la tige ne tient pas au-dessus du chariot
+        this.scale = Math.min(150, (this.cartY - 30) / (2 * l));
 
         const ctx = this.ctx;
         ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
@@ -492,17 +561,28 @@ class Animation {
         const ctx = this.ctx;
         const bob = this.bobPx();
 
-        ctx.strokeStyle = '#e74c3c';
-        ctx.lineWidth = 4;
+        const hl = this.dragTarget === 'pendulum' || (!this.isDragging && this.hitBob(this.mouseX, this.mouseY));
+
+        // Tige homogene
+        ctx.strokeStyle = hl ? '#c0392b' : '#e74c3c';
+        ctx.lineWidth = 9;
+        ctx.lineCap = 'round';
         ctx.beginPath();
         ctx.moveTo(cartX, this.cartY);
         ctx.lineTo(bob.x, bob.y);
         ctx.stroke();
+        ctx.lineCap = 'butt';
 
-        const hl = this.dragTarget === 'pendulum' || (!this.isDragging && this.hitBob(this.mouseX, this.mouseY));
+        // Centre de masse (a l du pivot)
+        ctx.fillStyle = '#fff';
+        ctx.beginPath();
+        ctx.arc((cartX + bob.x) / 2, (this.cartY + bob.y) / 2, 3, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Poignee a l'extremite
         ctx.fillStyle = hl ? '#c0392b' : '#e74c3c';
         ctx.beginPath();
-        ctx.arc(bob.x, bob.y, 12, 0, 2 * Math.PI);
+        ctx.arc(bob.x, bob.y, 9, 0, 2 * Math.PI);
         ctx.fill();
         if (hl) {
             ctx.strokeStyle = '#1abc9c';
@@ -753,6 +833,59 @@ class PerformanceMonitor {
     }
 }
 
+// ===== BOUCLE DE COMMANDE NUMERIQUE =====
+// Comme sur un vrai banc : le calculateur echantillonne les capteurs toutes les Ts,
+// maintient la commande constante entre deux echantillons (bloqueur d'ordre 0),
+// et le moteur ne suit la consigne qu'avec un retard du 1er ordre (constante tau).
+class ControlLoop {
+    constructor(physics, controller, sensors) {
+        this.physics = physics;
+        this.controller = controller;
+        this.sensors = sensors;
+        this.enabled = true;
+        this.ts = 0.01;
+        this.tau = 0.02;
+        this.reset();
+    }
+
+    configure({ enabled, noise, tau, ts }) {
+        this.enabled = enabled;
+        this.sensors.enabled = enabled;
+        this.sensors.noiseTheta = noise;
+        this.tau = tau;
+        this.ts = ts;
+    }
+
+    reset() {
+        this.controller.reset();
+        this.sensors.reset();
+        this.clock = 0;
+        this.command = 0;
+        this.motorForce = 0;
+    }
+
+    step(dt, xRef, push = 0, integrator = 'rk4') {
+        const p = this.physics;
+
+        if (!this.enabled) {
+            this.command = this.controller.compute(p.state, xRef, dt);
+            p.step(this.command + push, integrator);
+            return;
+        }
+
+        this.clock -= dt;
+        if (this.clock <= 0) {
+            const Ts = Math.max(this.ts, dt);
+            this.clock += Ts;
+            const measured = this.sensors.read(p.state, Ts);
+            this.command = clamp(this.controller.compute(measured, xRef, Ts), -p.fMax, p.fMax);
+        }
+
+        this.motorForce += (this.command - this.motorForce) * (this.tau > 0 ? 1 - Math.exp(-dt / this.tau) : 1);
+        p.step(this.motorForce + push, integrator);
+    }
+}
+
 // ===== APPLICATION PRINCIPALE =====
 class InvertedPendulumApp {
     constructor() {
@@ -763,6 +896,7 @@ class InvertedPendulumApp {
         this.anglePlot = new Plotter('angle-plot', 'Angle θ(t)', 'θ (rad)', '#e74c3c');
         this.positionPlot = new Plotter('position-plot', 'Position x(t)', 'x (m)', '#3498db');
         this.performance = new PerformanceMonitor();
+        this.bench = new ControlLoop(this.physics, this.controller, new Sensors());
 
         this.isRunning = false;
         this.animationId = null;
@@ -803,7 +937,7 @@ class InvertedPendulumApp {
             this.physics.setState(this.physics.x, 0, clamp(theta, -Math.PI / 2, Math.PI / 2), 0);
         };
         this.animation.onDragEnd = () => {
-            this.controller.reset();
+            this.bench.reset();
             this.performance.reset(this.ui.mode, this.physics.x);
             this.performance.t0 = this.physics.t;
         };
@@ -844,7 +978,7 @@ class InvertedPendulumApp {
 
         this.physics.updateParams(this.ui.getSystemParams());
         this.physics.reset(initial);
-        this.controller.reset();
+        this.bench.reset();
         this.performance.reset(this.ui.mode, 0);
         this.performance.t0 = 0;
         this.pendingImpulseAt = scenario === 'impulse' ? 1.0 : null;
@@ -888,8 +1022,10 @@ class InvertedPendulumApp {
         this.lastTime = now;
 
         if (!this.animation.isDragging) {
-            this.physics.updateParams(this.ui.getSystemParams());
+            const r = this.ui.getRealismParams();
+            this.physics.updateParams({ ...this.ui.getSystemParams(), coulomb: r.enabled ? r.fs : 0 });
             this.controller.setGains(this.ui.getGains());
+            this.bench.configure(r);
             while (this.accumulator >= sim.dt) {
                 this.update(sim);
                 this.accumulator -= sim.dt;
@@ -913,11 +1049,11 @@ class InvertedPendulumApp {
             this.performance.t0 = p.t;
         }
 
-        let F = this.controller.compute(p.state, this.targetX, sim.dt);
-        if (this.keys.left) F -= this.keyForce;
-        if (this.keys.right) F += this.keyForce;
+        let push = 0;
+        if (this.keys.left) push -= this.keyForce;
+        if (this.keys.right) push += this.keyForce;
 
-        p.step(F, sim.integrator);
+        this.bench.step(sim.dt, this.targetX, push, sim.integrator);
 
         this.performance.update(p.t - (this.performance.t0 || 0), p.x, p.theta, this.targetX);
         this.anglePlot.addPoint(p.t, p.theta);
@@ -941,5 +1077,5 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module !== 'undefined') {
-    module.exports = { Physics, PIDController, wrapAngle };
+    module.exports = { Physics, PIDController, Sensors, ControlLoop, wrapAngle };
 }
