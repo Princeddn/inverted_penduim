@@ -6,6 +6,19 @@
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
+// Les textes numeriques ne sont rafraichis que 4 fois par seconde :
+// lisibles, sans chiffres qui scintillent a chaque image.
+const TEXT_REFRESH_MS = 250;
+const textCache = new Map();
+const steady = (key, make) => {
+    const now = Date.now();
+    const c = textCache.get(key);
+    if (c && now - c.t < TEXT_REFRESH_MS) return c.s;
+    const s = make();
+    textCache.set(key, { t: now, s });
+    return s;
+};
+
 const wrapAngle = (a) => {
     const twoPi = 2 * Math.PI;
     a = (a + Math.PI) % twoPi;
@@ -402,6 +415,11 @@ class UI {
     onModeChange() {}
 
     updateIndicators(m) {
+        // Rafraichi 4 fois par seconde seulement (evite chiffres et couleurs qui clignotent)
+        const now = Date.now();
+        if (this.lastIndicators && now - this.lastIndicators < TEXT_REFRESH_MS) return;
+        this.lastIndicators = now;
+
         this.$('stability-time').textContent = m.stabilityTime !== null ? `${m.stabilityTime.toFixed(2)} s` : '-- s';
         this.$('max-angle').textContent = `${m.maxAngle.toFixed(3)} rad`;
         this.$('rise-time').textContent = m.riseTime !== null ? `${m.riseTime.toFixed(2)} s` : '-- s';
@@ -422,7 +440,8 @@ class UI {
 
     setStatus(type, status) {
         const el = this.$(`${type}-indicator`);
-        el.className = 'indicator' + (status ? ` ${status}` : '');
+        const cls = 'indicator' + (status ? ` ${status}` : '');
+        if (el.className !== cls) el.className = cls;
     }
 
     getGains() {
@@ -633,7 +652,8 @@ class Animation {
         const n = Math.hypot(fx, fy);
         if (n < 0.05) return;
         // fy est vers le haut (physique) -> canvas vers le bas
-        this.arrow(x0, y0, fx / n, -fy / n, Animation.arrowLength(n), color, `${name} ${n.toFixed(1)} N`, labelSide);
+        this.arrow(x0, y0, fx / n, -fy / n, Animation.arrowLength(n), color,
+                   steady(`force-${name}`, () => `${name} ${n.toFixed(1)} N`), labelSide);
     }
 
     drawForceVectors(cartX, theta, f) {
@@ -659,7 +679,7 @@ class Animation {
         ctx.font = 'bold 12px sans-serif';
         ctx.textAlign = 'left';
         ctx.fillStyle = C.normal;
-        ctx.fillText(`N ${Math.abs(f.normal).toFixed(1)} N`, cartX + this.cartWidth / 3 + 8, railY + nLen * 0.6 + 4);
+        ctx.fillText(steady('force-N', () => `N ${Math.abs(f.normal).toFixed(1)} N`), cartX + this.cartWidth / 3 + 8, railY + nLen * 0.6 + 4);
 
         if (Math.abs(f.motor) > 0.05) {
             const s = Math.sign(f.motor);
@@ -801,7 +821,7 @@ class Animation {
         ctx.font = 'bold 13px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`θ = ${(theta * 180 / Math.PI).toFixed(1)}°`, cartX + lr * Math.cos(mid), y + lr * Math.sin(mid));
+        ctx.fillText(steady('theta-arc', () => `θ = ${(theta * 180 / Math.PI).toFixed(1)}°`), cartX + lr * Math.cos(mid), y + lr * Math.sin(mid));
         ctx.restore();
     }
 
@@ -881,9 +901,9 @@ class Animation {
         const ctx = this.ctx;
         ctx.fillStyle = '#2c3e50';
         ctx.font = '14px monospace';
-        ctx.fillText(`x = ${x.toFixed(3)} m`, 10, 25);
-        ctx.fillText(`θ = ${theta.toFixed(3)} rad (${(theta * 180 / Math.PI).toFixed(1)}°)`, 10, 45);
-        ctx.fillText(`F = ${F.toFixed(2)} N`, 10, 65);
+        ctx.fillText(steady('hud-x', () => `x = ${x.toFixed(3)} m`), 10, 25);
+        ctx.fillText(steady('hud-th', () => `θ = ${theta.toFixed(3)} rad (${(theta * 180 / Math.PI).toFixed(1)}°)`), 10, 45);
+        ctx.fillText(steady('hud-F', () => `F = ${F.toFixed(2)} N`), 10, 65);
     }
 
     drawInstructions() {
@@ -929,9 +949,17 @@ class Plotter {
         const tStart = Math.max(0, tNow - this.timeWindow);
         const values = this.data.map(d => d.y);
         if (this.reference !== null) values.push(this.reference);
-        let yMin = Math.min(0, ...values), yMax = Math.max(0, ...values);
-        const pad = Math.max((yMax - yMin) * 0.1, 0.01);
-        yMin -= pad; yMax += pad;
+        // Axe Y stable : bornes arrondies a un pas "rond", elargies tout de suite,
+        // resserrees seulement quand la courbe occupe moins de 40 % de l'axe
+        const lo = Math.min(0, ...values), hi = Math.max(0, ...values);
+        const step = Plotter.niceStep((hi - lo) || 0.01);
+        const tMin = Math.floor(lo / step) * step - step / 2, tMax = Math.ceil(hi / step) * step + step / 2;
+        if (this.yMin === undefined || lo < this.yMin || hi > this.yMax ||
+            (hi - lo) < 0.4 * (this.yMax - this.yMin)) {
+            this.yMin = tMin;
+            this.yMax = tMax;
+        }
+        const yMin = this.yMin, yMax = this.yMax;
 
         const X = (t) => m.left + pw * (t - tStart) / this.timeWindow;
         const Y = (v) => m.top + ph * (yMax - v) / (yMax - yMin);
@@ -994,8 +1022,16 @@ class Plotter {
         ctx.fillText(this.title, W / 2, 20);
     }
 
+    static niceStep(range) {
+        const raw = range / 4;
+        const p = Math.pow(10, Math.floor(Math.log10(raw)));
+        const f = raw / p;
+        return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p;
+    }
+
     clear() {
         this.data = [];
+        this.yMin = this.yMax = undefined;
     }
 }
 

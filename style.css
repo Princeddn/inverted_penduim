@@ -286,3 +286,16 @@ canvas {
         grid-template-columns: 1fr;
     }
 }
+/* Indicateurs de taille fixe : un texte qui change ne doit jamais faire bouger la page */
+.performance-indicators {
+    grid-template-columns: repeat(auto-fit, minmax(125px, 1fr));
+}
+
+.indicator {
+    min-height: 88px;
+}
+
+.indicator .value {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
