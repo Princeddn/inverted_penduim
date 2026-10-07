@@ -27,6 +27,9 @@
                     <button id="strict-mode" class="mode-btn active">Stabilisation</button>
                     <button id="project-mode" class="mode-btn">Suivi x = 0.2 m</button>
                 </div>
+                <label style="display:flex;gap:8px;align-items:center;margin-bottom:10px">
+                    <input type="checkbox" id="show-forces" checked> Afficher les forces
+                </label>
                 <label for="scenario">Scénario</label>
                 <select id="scenario">
                     <option value="swingup" selected>Départ en bas (redressement)</option>
@@ -195,6 +198,7 @@
         <ul>
             <li>Le pendule est une tige homogène de longueur 2l (point blanc = centre de masse), d'inertie m<sub>p</sub>l²/3.</li>
             <li>Mode « banc réel » : commande numérique échantillonnée à Ts, moteur du 1er ordre, capteurs bruités et quantifiés, frottement sec du chariot.</li>
+            <li>Forces affichées : poids P (tige, en G) et Pc (chariot), force F du moteur, réaction N du rail (répartie sur les roues), force R du pivot sur la tige (R = m<sub>p</sub>a<sub>G</sub> − m<sub>p</sub>g), frottements f du rail.</li>
             <li>Les gains sont positifs : pour rattraper le pendule, le chariot doit aller <strong>dans le sens</strong> de l'inclinaison.</li>
             <li>L'auto-réglage linéarise le système autour de θ = 0 et place les pôles (Ackermann) : 2 pôles lents pour la position, 2 rapides pour l'angle.</li>
             <li>Au départ le pendule pend au repos. « Lancer » active le contrôleur : il pompe de l'énergie en faisant osciller le chariot (redressement d'Åström-Furuta), puis passe en stabilisation quand |θ| &lt; 23°. S'il dépasse 46°, il repasse en redressement.</li>

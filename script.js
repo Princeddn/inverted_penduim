@@ -112,6 +112,27 @@ class Physics {
         this.state[1] += impulse / this.mc;
     }
 
+    // Bilan des forces a l'instant courant (N), repere x vers la droite, y vers le haut.
+    // La force du pivot sur la tige vient de Newton applique au centre de masse G :
+    //   R = mp aG - mp g   avec   G = (x + l sin th, l cos th)
+    forces(F) {
+        const [, x_dot, theta, theta_dot] = this.state;
+        const [, x_ddot, , theta_ddot] = this.derivatives(this.state, F);
+        const S = Math.sin(theta), C = Math.cos(theta);
+        const aGx = x_ddot + this.l * (C * theta_ddot - S * theta_dot ** 2);
+        const aGy = -this.l * (S * theta_ddot + C * theta_dot ** 2);
+        const Rx = this.mp * aGx;
+        const Ry = this.mp * aGy + this.mp * this.g;
+        return {
+            motor: F,
+            weightPole: this.mp * this.g,
+            weightCart: this.mc * this.g,
+            pivot: [Rx, Ry],                       // force du chariot sur la tige
+            normal: this.mc * this.g + Ry,         // reaction du rail sur le chariot
+            friction: -this.b * x_dot - this.coulomb * Math.tanh(x_dot / 0.01)
+        };
+    }
+
     setState(x, x_dot, theta, theta_dot) {
         this.state = [x, x_dot, theta, theta_dot];
     }
@@ -433,6 +454,14 @@ class UI {
 }
 
 // ===== MODULE ANIMATION AVEC INTERACTIVITE =====
+const FORCE_COLORS = {
+    weight: '#d35400',   // poids
+    motor: '#27ae60',    // moteur
+    normal: '#2980b9',   // reaction du rail
+    pivot: '#16a085',    // force du pivot
+    friction: '#7f8c8d'  // frottements
+};
+
 class Animation {
     constructor(canvasId) {
         this.canvas = document.getElementById(canvasId);
@@ -534,7 +563,7 @@ class Animation {
         this.canvas.style.cursor = 'default';
     }
 
-    draw(x, theta, l, force, targetX = null) {
+    draw(x, theta, l, force, targetX = null, forces = null) {
         this.currentX = x;
         this.currentTheta = theta;
         this.currentL = l;
@@ -548,12 +577,120 @@ class Animation {
         if (targetX !== null) this.drawTarget(this.centerX + targetX * this.scale);
 
         const cartX = this.cartPx();
-        this.drawForce(cartX, force);
+        if (!forces) this.drawForce(cartX, force);
         this.drawCart(cartX);
         this.drawAngle(cartX, theta);
         this.drawPole(cartX);
+        if (forces) {
+            this.drawForceVectors(cartX, theta, forces);
+            this.drawForceLegend();
+        }
         this.drawValues(x, theta, force);
         this.drawInstructions();
+    }
+
+    // Longueur affichee proportionnelle a la racine de |F| : petites et grandes forces restent lisibles
+    static arrowLength(F) {
+        return Math.min(120, 18 * Math.sqrt(Math.abs(F)));
+    }
+
+    // Fleche partant de (x0, y0) dans la direction (ux, uy) (repere canvas), de longueur len
+    arrow(x0, y0, ux, uy, len, color, label, labelSide = 1) {
+        if (len < 4) return;
+        const ctx = this.ctx;
+        const x1 = x0 + ux * len, y1 = y0 + uy * len;
+        ctx.strokeStyle = ctx.fillStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+        const nx = -uy, ny = ux;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x1 - 9 * ux + 4.5 * nx, y1 - 9 * uy + 4.5 * ny);
+        ctx.lineTo(x1 - 9 * ux - 4.5 * nx, y1 - 9 * uy - 4.5 * ny);
+        ctx.closePath();
+        ctx.fill();
+        if (label) {
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            const lx = x1 + ux * 14 + nx * 12 * labelSide, ly = y1 + uy * 14 + ny * 12 * labelSide;
+            const w = ctx.measureText(label).width + 6;
+            ctx.fillStyle = 'rgba(255,255,255,0.85)';
+            ctx.fillRect(lx - w / 2, ly - 8, w, 16);
+            ctx.fillStyle = color;
+            ctx.fillText(label, lx, ly);
+            ctx.textBaseline = 'alphabetic';
+        }
+    }
+
+    vector(x0, y0, fx, fy, color, name, labelSide = 1) {
+        const n = Math.hypot(fx, fy);
+        if (n < 0.05) return;
+        // fy est vers le haut (physique) -> canvas vers le bas
+        this.arrow(x0, y0, fx / n, -fy / n, Animation.arrowLength(n), color, `${name} ${n.toFixed(1)} N`, labelSide);
+    }
+
+    drawForceVectors(cartX, theta, f) {
+        const y = this.cartY, L = 2 * this.currentL * this.scale;
+        const gx = cartX + (L / 2) * Math.sin(theta), gy = y - (L / 2) * Math.cos(theta);
+        const C = FORCE_COLORS;
+
+        // Sur la tige : poids en G, force du pivot au pivot
+        this.vector(gx, gy, 0, -f.weightPole, C.weight, 'P', 1);
+        this.vector(cartX, y, f.pivot[0], f.pivot[1], C.pivot, 'R', -1);
+
+        // Sur le chariot : poids, reaction du rail (aux roues), moteur, frottement
+        this.vector(cartX, y + 4, 0, -f.weightCart, C.weight, 'Pc', 1);
+
+        // N repartie sur les deux roues (N/2 chacune) : le rail pousse les roues vers le haut,
+        // fleches dessinees sous le rail et se terminant au contact
+        const railY = this.railY;
+        const nLen = Animation.arrowLength(f.normal / 2), nDir = f.normal >= 0 ? -1 : 1;
+        for (const k of [-1, 1]) {
+            this.arrow(cartX + k * this.cartWidth / 3, railY - nDir * nLen, 0, nDir, nLen, C.normal, '');
+        }
+        const ctx = this.ctx;
+        ctx.font = 'bold 12px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = C.normal;
+        ctx.fillText(`N ${Math.abs(f.normal).toFixed(1)} N`, cartX + this.cartWidth / 3 + 8, railY + nLen * 0.6 + 4);
+
+        if (Math.abs(f.motor) > 0.05) {
+            const s = Math.sign(f.motor);
+            this.vector(cartX + s * this.cartWidth / 2, y - 6, f.motor, 0, C.motor, 'F', -s);
+        }
+        // Frottement au contact roues/rail, oppose au mouvement
+        if (Math.abs(f.friction) > 0.05) {
+            const s = Math.sign(f.friction);
+            this.vector(cartX + s * this.cartWidth / 2, railY - 4, f.friction, 0, C.friction, 'f', s);
+        }
+    }
+
+    drawForceLegend() {
+        const ctx = this.ctx, C = FORCE_COLORS;
+        const items = [
+            [C.weight, 'P, Pc : poids (tige, chariot)'],
+            [C.motor, 'F : force du moteur'],
+            [C.normal, 'N : réaction du rail'],
+            [C.pivot, 'R : force du pivot sur la tige'],
+            [C.friction, 'f : frottements du rail']
+        ];
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'left';
+        const x = 10, y0 = this.canvas.height - 12 - (items.length - 1) * 17;
+        items.forEach(([c, t], i) => {
+            ctx.fillStyle = c;
+            ctx.fillRect(x, y0 + i * 17 - 9, 14, 4);
+            ctx.fillStyle = '#2c3e50';
+            ctx.fillText(t, x + 20, y0 + i * 17 - 3);
+        });
+        ctx.fillStyle = '#7f8c8d';
+        ctx.textAlign = 'right';
+        ctx.fillText('Longueur des flèches ∝ √|F|', this.canvas.width - 10, this.canvas.height - 12);
+        ctx.textAlign = 'left';
     }
 
     drawRail() {
@@ -1183,7 +1320,9 @@ class InvertedPendulumApp {
 
     render() {
         const p = this.physics;
-        this.animation.draw(p.x, p.theta, p.l, p.lastForce, this.ui.mode === 'project' ? this.targetX : null);
+        const showForces = document.getElementById('show-forces').checked;
+        this.animation.draw(p.x, p.theta, p.l, p.lastForce, this.ui.mode === 'project' ? this.targetX : null,
+                            showForces ? p.forces(p.lastForce) : null);
         this.anglePlot.draw();
         this.positionPlot.draw();
         const m = this.performance.getMetrics(p.lastForce);
