@@ -1,172 +1,114 @@
+// =====================================================================
+// Pendule inverse sur chariot - simulation temps reel
+// Convention : x vers la droite, theta = 0 pendule vertical VERS LE HAUT,
+// theta > 0 quand le pendule penche vers la droite.
+// =====================================================================
+
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+const wrapAngle = (a) => {
+    const twoPi = 2 * Math.PI;
+    a = (a + Math.PI) % twoPi;
+    if (a < 0) a += twoPi;
+    return a - Math.PI;
+};
+
 // ===== MODULE PHYSICS =====
 class Physics {
     constructor(params = {}) {
-        // Parametres physiques du systeme
-        this.mc = params.mc || 1.0;     // masse chariot (kg)
-        this.mp = params.mp || 0.3;     // masse pendule (kg)
-        this.l = params.l || 0.5;       // longueur pendule (m)
-        this.b = params.b || 0.05;      // coefficient frottement chariot (N·s/m)
-        this.c = params.c || 0.01;      // coefficient frottement pendule (N·m·s)
-        this.g = params.g || 9.81;      // gravite (m/s2)
-        this.fMax = params.fMax || 50;  // force max (N)
+        this.mc = 1.0;      // masse chariot (kg)
+        this.mp = 0.3;      // masse pendule (kg)
+        this.l = 0.5;       // distance pivot -> masse (m)
+        this.b = 0.05;      // frottement chariot (N.s/m)
+        this.c = 0.01;      // frottement pivot (N.m.s)
+        this.g = 9.81;      // gravite (m/s2)
+        this.fMax = 50;     // saturation de l'actionneur (N)
+        this.railLimit = 2.2; // demi-longueur du rail (m)
+        Object.assign(this, params);
 
-        // Etat du systeme [x, x_dot, theta, theta_dot]
-        this.state = [0, 0, 0.1, 0]; // Commence pres de la verticale
-
-        // Temps
+        this.state = [0, 0, 0.1, 0]; // [x, x_dot, theta, theta_dot]
         this.t = 0;
-        this.dt = 0.01; // pas d'integration (s)
+        this.dt = 0.005;
+        this.lastForce = 0;
     }
 
-    // Met a jour les parametres physiques
     updateParams(params) {
         Object.assign(this, params);
     }
 
-    // Normalise l'angle entre -PI et PI (utilitaire du modele de reference)
-    wrapAngle(angle) {
-        const pi = Math.PI;
-        const twoPi = 2 * pi;
-        angle = (angle + pi) % twoPi;
-        if (angle < 0) angle += twoPi;
-        return angle - pi;
-    }
-
-    // Calcule les derivees du systeme - Equations du modele de reference
-    derivatives(state, force) {
-        const [x, x_dot, theta, theta_dot] = state;
-        const F = Math.max(-this.fMax, Math.min(this.fMax, force)); // saturation
-
+    // Equations de Lagrange (masse ponctuelle a la distance l) :
+    //  (mc+mp) x'' + mp l cos(th) th'' = F - b x' + mp l th'^2 sin(th)
+    //  cos(th) x'' + l th''           = g sin(th) - c/(mp l) th'
+    derivatives(state, F) {
+        const [, x_dot, theta, theta_dot] = state;
         const S = Math.sin(theta);
         const C = Math.cos(theta);
-        const totalM = this.mc + this.mp;
 
-        // Frottement pendule (ajoute pour plus de realisme)
-        const c = this.c || 0.01; // coefficient frottement pendule
-
-        // Matrice implicite 2x2 sur [x¨, θ¨]^T (methode de reference)
-        // (mc+mp) * x¨ + b x˙ + mp l (θ¨ cosθ - θ˙² sinθ) = F
-        // l θ¨ + (c/(mp l)) θ˙ + g sinθ = - x¨ cosθ
-
-        const a11 = totalM;
+        const a11 = this.mc + this.mp;
         const a12 = this.mp * this.l * C;
         const a21 = C;
         const a22 = this.l;
 
-        const v1 = F - this.b * x_dot - this.mp * this.l * theta_dot * theta_dot * S;
-        const v2 = -(c / (this.mp * this.l)) * theta_dot - this.g * S;
+        const v1 = F - this.b * x_dot + this.mp * this.l * theta_dot * theta_dot * S;
+        const v2 = this.g * S - (this.c / (this.mp * this.l)) * theta_dot;
 
-        // Resolution 2x2 : det = (mc+mp)*l - mp*l*C*C = l(mc + mp*(1 - C^2))
+        // det = l (mc + mp sin^2) > 0 toujours
         const det = a11 * a22 - a12 * a21;
-        const inv11 = a22 / det;
-        const inv12 = -a12 / det;
-        const inv21 = -a21 / det;
-        const inv22 = a11 / det;
-
-        const x_ddot = inv11 * v1 + inv12 * v2;
-        const theta_ddot = inv21 * v1 + inv22 * v2;
+        const x_ddot = (a22 * v1 - a12 * v2) / det;
+        const theta_ddot = (-a21 * v1 + a11 * v2) / det;
 
         return [x_dot, x_ddot, theta_dot, theta_ddot];
     }
 
-    // Integration Runge-Kutta 4eme ordre
-    rk4Step(force) {
-        const k1 = this.derivatives(this.state, force);
-
-        const state_k2 = this.state.map((s, i) => s + this.dt * k1[i] / 2);
-        const k2 = this.derivatives(state_k2, force);
-
-        const state_k3 = this.state.map((s, i) => s + this.dt * k2[i] / 2);
-        const k3 = this.derivatives(state_k3, force);
-
-        const state_k4 = this.state.map((s, i) => s + this.dt * k3[i]);
-        const k4 = this.derivatives(state_k4, force);
-
-        // Mise a jour de l'etat
+    rk4Step(F) {
+        const s = this.state, h = this.dt;
+        const k1 = this.derivatives(s, F);
+        const k2 = this.derivatives(s.map((v, i) => v + h * k1[i] / 2), F);
+        const k3 = this.derivatives(s.map((v, i) => v + h * k2[i] / 2), F);
+        const k4 = this.derivatives(s.map((v, i) => v + h * k3[i]), F);
         for (let i = 0; i < 4; i++) {
-            this.state[i] += this.dt * (k1[i] + 2*k2[i] + 2*k3[i] + k4[i]) / 6;
+            s[i] += h * (k1[i] + 2 * k2[i] + 2 * k3[i] + k4[i]) / 6;
         }
-
-        // Normalise l'angle theta (indice 2) pour eviter les problemes numeriques
-        this.state[2] = this.wrapAngle(this.state[2]);
-
-        this.t += this.dt;
     }
 
-    // Integration Euler
-    eulerStep(force) {
-        const derivatives = this.derivatives(this.state, force);
-        for (let i = 0; i < 4; i++) {
-            this.state[i] += this.dt * derivatives[i];
-        }
-        this.t += this.dt;
+    eulerStep(F) {
+        const d = this.derivatives(this.state, F);
+        for (let i = 0; i < 4; i++) this.state[i] += this.dt * d[i];
     }
 
-    // Avance la simulation d'un pas
     step(force, integrator = 'rk4') {
-        if (integrator === 'rk4') {
-            this.rk4Step(force);
-        } else {
-            this.eulerStep(force);
+        const F = clamp(force, -this.fMax, this.fMax);
+        this.lastForce = F;
+
+        if (integrator === 'rk4') this.rk4Step(F);
+        else this.eulerStep(F);
+
+        this.state[2] = wrapAngle(this.state[2]);
+
+        // Butees du rail : choc inelastique
+        if (Math.abs(this.state[0]) > this.railLimit) {
+            this.state[0] = Math.sign(this.state[0]) * this.railLimit;
+            this.state[1] = 0;
         }
 
-        // Limite la position du chariot avec amortissement intelligent
-        const maxPosition = 1.1; // metres (reduit pour plus de securite)
-        const softBoundary = 0.9; // zone d'amortissement
-
-        if (this.state[0] > maxPosition) {
-            this.state[0] = maxPosition;
-            this.state[1] = -Math.abs(this.state[1]) * 0.3; // Rebond tres amorti
-        } else if (this.state[0] < -maxPosition) {
-            this.state[0] = -maxPosition;
-            this.state[1] = Math.abs(this.state[1]) * 0.3; // Rebond tres amorti
-        }
-
-        // Zone d'amortissement progressive plus aggressive
-        if (this.state[0] > softBoundary) {
-            const factor = (this.state[0] - softBoundary) / (maxPosition - softBoundary);
-            this.state[1] *= (1 - factor * 0.6); // Amortissement plus fort
-        } else if (this.state[0] < -softBoundary) {
-            const factor = (-this.state[0] - softBoundary) / (maxPosition - softBoundary);
-            this.state[1] *= (1 - factor * 0.6); // Amortissement plus fort
-        }
-
-        // Limitation de la vitesse angulaire pour eviter le spinning
-        const maxAngularVelocity = 10; // rad/s
-        if (Math.abs(this.state[3]) > maxAngularVelocity) {
-            this.state[3] = Math.sign(this.state[3]) * maxAngularVelocity;
-        }
+        this.t += this.dt;
     }
 
-    // Remet a zero la simulation
     reset(initialState = [0, 0, 0.1, 0]) {
         this.state = [...initialState];
         this.t = 0;
+        this.lastForce = 0;
     }
 
-    // Applique une impulsion
+    // Impulsion horizontale (N.s) appliquee au chariot
     applyImpulse(impulse) {
-        // Impulsion = changement de momentum
-        // Pour le chariot: Δp = mc * Δv = impulse
         this.state[1] += impulse / this.mc;
     }
 
-    // Verifie si le pendule est tombe (avec detection de boucle infinie)
-    hasFallen() {
-        // Detection de problemes graves
-        const isOutOfBounds = Math.abs(this.state[0]) > 1.8;
-        const isSpinning = Math.abs(this.state[2]) > 6*Math.PI; // Plus de 3 tours
-        const hasExtremeVelocity = Math.abs(this.state[1]) > 10 || Math.abs(this.state[3]) > 20;
-
-        return isOutOfBounds || isSpinning || hasExtremeVelocity;
-    }
-
-    // Permet de modifier directement l'etat (pour l'interactivite)
     setState(x, x_dot, theta, theta_dot) {
         this.state = [x, x_dot, theta, theta_dot];
     }
 
-    // Getters pour l'etat actuel
     get x() { return this.state[0]; }
     get x_dot() { return this.state[1]; }
     get theta() { return this.state[2]; }
@@ -174,162 +116,147 @@ class Physics {
 }
 
 // ===== MODULE CONTROLLER =====
+// Retour d'etat avec integrale sur l'angle :
+//   F = Kp th + Ki int(th) + Kd th' + Kx (x - x_ref) + Kv x'
+// Tous les gains sont positifs pour un pendule inverse (il faut deplacer
+// le chariot SOUS la masse, donc dans le sens de l'inclinaison).
 class PIDController {
-    constructor(kp = 80, ki = 15, kd = 12) {
-        this.kp = kp;
-        this.ki = ki;
-        this.kd = kd;
-
+    constructor(gains = {}) {
+        this.kp = 82.6; this.ki = 0; this.kd = 17.4;
+        this.kx = 12.6; this.kv = 15.7;
+        Object.assign(this, gains);
         this.integral = 0;
-        this.lastError = 0;
-        this.lastTime = 0;
+        this.maxIntegral = 0.5;
+        this.fallAngle = Math.PI / 2; // au-dela le controleur abandonne
     }
 
-    // Met a jour les gains PID
-    setGains(kp, ki, kd) {
-        this.kp = kp;
-        this.ki = ki;
-        this.kd = kd;
+    setGains(gains) {
+        Object.assign(this, gains);
     }
 
-    // Calcule la commande PID
-    compute(setpoint, measurement, dt) {
-        const error = setpoint - measurement;
+    compute(state, xRef, dt) {
+        const [x, x_dot, theta, theta_dot] = state;
+        const th = wrapAngle(theta);
 
-        // Terme integral
-        this.integral += error * dt;
+        if (Math.abs(th) > this.fallAngle) {
+            this.integral = 0;
+            return 0;
+        }
 
-        // Terme derive
-        const derivative = (error - this.lastError) / dt;
+        this.integral = clamp(this.integral + th * dt, -this.maxIntegral, this.maxIntegral);
 
-        // Commande PID
-        const output = this.kp * error + this.ki * this.integral + this.kd * derivative;
-
-        this.lastError = error;
-
-        return output;
+        return this.kp * th + this.ki * this.integral + this.kd * theta_dot
+             + this.kx * (x - xRef) + this.kv * x_dot;
     }
 
-    // Remet a zero l'integrateur
     reset() {
         this.integral = 0;
-        this.lastError = 0;
     }
 
-    // Auto-reglage Ziegler-Nichols (approximation)
-    autoTune() {
-        // Approximation simple basee sur les caracteristiques du systeme
-        const ku = 25; // Gain critique approximatif
-        const tu = 0.5; // Periode critique approximative
+    // Auto-reglage par placement de poles (Ackermann) sur le modele linearise.
+    // speed > 1 = reponse plus rapide (et forces plus grandes).
+    static autoTune(p, speed = 1) {
+        const { mc, mp, l, b, c, g } = p;
+        const cp = c / (mp * l);
+        const A = [
+            [0, 1, 0, 0],
+            [0, -b / mc, -mp * g / mc, mp * cp / mc],
+            [0, 0, 0, 1],
+            [0, b / (l * mc), (mc + mp) * g / (l * mc), -(mc + mp) * cp / (l * mc)]
+        ];
+        const B = [0, 1 / mc, 0, -1 / (l * mc)];
+        const mul = (X, Y) => X.map(r => Y[0].map((_, j) => r.reduce((s, v, k) => s + v * Y[k][j], 0)));
+        const mv = (X, v) => X.map(r => r.reduce((s, a, k) => s + a * v[k], 0));
+        const I = [0, 1, 2, 3].map(i => [0, 1, 2, 3].map(j => (i === j ? 1 : 0)));
 
-        this.kp = 0.6 * ku;
-        this.ki = 2 * this.kp / tu;
-        this.kd = this.kp * tu / 8;
+        // 2 poles lents (position) + 2 poles rapides (angle) lies a la pulsation propre
+        const w0 = Math.sqrt(Math.abs(g) * (mc + mp) / (mc * l)) || 1;
+        const poles = [-1.8 * speed, -2.4 * speed, -1.4 * w0 * speed, -1.6 * w0 * speed];
 
-        return { kp: this.kp, ki: this.ki, kd: this.kd };
+        // Polynome caracteristique desire
+        let coef = [1];
+        for (const pk of poles) {
+            const n = [...coef, 0];
+            for (let i = 1; i < n.length; i++) n[i] -= pk * coef[i - 1];
+            coef = n;
+        }
+
+        // phi(A) = A^4 + a1 A^3 + a2 A^2 + a3 A + a4 I
+        let phi = I.map(r => r.map(v => v * coef[4]));
+        let Ak = I;
+        for (let k = 1; k <= 4; k++) {
+            Ak = mul(Ak, A);
+            phi = phi.map((r, i) => r.map((v, j) => v + coef[4 - k] * Ak[i][j]));
+        }
+
+        // Commandabilite : on resout C' y = e4 (Gauss-Jordan), puis K = y' phi(A)
+        const cols = [B];
+        for (let k = 1; k < 4; k++) cols.push(mv(A, cols[k - 1]));
+        const M = [0, 1, 2, 3].map(i => [...cols[i], i === 3 ? 1 : 0]);
+        for (let i = 0; i < 4; i++) {
+            let piv = i;
+            for (let r = i + 1; r < 4; r++) if (Math.abs(M[r][i]) > Math.abs(M[piv][i])) piv = r;
+            [M[i], M[piv]] = [M[piv], M[i]];
+            for (let r = 0; r < 4; r++) {
+                if (r === i) continue;
+                const f = M[r][i] / M[i][i];
+                for (let k = i; k < 5; k++) M[r][k] -= f * M[i][k];
+            }
+        }
+        const y = M.map((r, i) => r[4] / r[i]);
+        const K = [0, 1, 2, 3].map(j => y.reduce((s, v, k) => s + v * phi[k][j], 0));
+
+        // F = -K s
+        return { kx: -K[0], kv: -K[1], kp: -K[2], ki: 0, kd: -K[3] };
     }
 
-    // Presets de reglage
-    static getPreset(type) {
-        const presets = {
-            underdamped: { kp: 45, ki: 10, kd: 5 },
-            critical: { kp: 50, ki: 12, kd: 6 },
-            overdamped: { kp: 35, ki: 8, kd: 4 }
-        };
-        return presets[type] || presets.critical;
+    static presetSpeed(type) {
+        return { soft: 0.7, nominal: 1.0, aggressive: 1.4 }[type] || 1.0;
     }
 }
 
 // ===== MODULE UI =====
+const SLIDERS = ['kp', 'ki', 'kd', 'kx', 'kv', 'mc', 'mp', 'l', 'b', 'c', 'g', 'fmax', 'dt'];
+
 class UI {
     constructor() {
-        this.isPlaying = false;
-        this.mode = 'strict'; // 'strict' ou 'project'
-        this.initializeElements();
-        this.setupEventListeners();
-    }
+        this.mode = 'strict'; // 'strict' (stabilisation) ou 'project' (suivi de position)
+        this.$ = (id) => document.getElementById(id);
 
-    initializeElements() {
-        // Controles principaux
-        this.playBtn = document.getElementById('play-btn');
-        this.pauseBtn = document.getElementById('pause-btn');
-        this.resetBtn = document.getElementById('reset-btn');
-        this.impulseBtn = document.getElementById('impulse-btn');
+        this.playBtn = this.$('play-btn');
+        this.pauseBtn = this.$('pause-btn');
+        this.resetBtn = this.$('reset-btn');
+        this.impulseBtn = this.$('impulse-btn');
+        this.strictModeBtn = this.$('strict-mode');
+        this.projectModeBtn = this.$('project-mode');
+        this.pidPreset = this.$('pid-preset');
+        this.autoTuneBtn = this.$('auto-tune');
+        this.integratorSelect = this.$('integrator');
+        this.scenarioSelect = this.$('scenario');
 
-        // Mode
-        this.strictModeBtn = document.getElementById('strict-mode');
-        this.projectModeBtn = document.getElementById('project-mode');
-
-        // Sliders PID
-        this.kpSlider = document.getElementById('kp-slider');
-        this.kiSlider = document.getElementById('ki-slider');
-        this.kdSlider = document.getElementById('kd-slider');
-        this.pidPreset = document.getElementById('pid-preset');
-        this.autoTuneBtn = document.getElementById('auto-tune');
-
-        // Sliders systeme
-        this.mcSlider = document.getElementById('mc-slider');
-        this.mpSlider = document.getElementById('mp-slider');
-        this.lSlider = document.getElementById('l-slider');
-        this.bSlider = document.getElementById('b-slider');
-        this.gSlider = document.getElementById('g-slider');
-        this.fmaxSlider = document.getElementById('fmax-slider');
-
-        // Simulation
-        this.dtSlider = document.getElementById('dt-slider');
-        this.integratorSelect = document.getElementById('integrator');
-        this.scenarioSelect = document.getElementById('scenario');
-
-        // Indicateurs
-        this.stabilityIndicator = document.getElementById('stability-indicator');
-        this.angleIndicator = document.getElementById('angle-indicator');
-        this.riseIndicator = document.getElementById('rise-indicator');
-        this.errorIndicator = document.getElementById('error-indicator');
-        this.statusIndicator = document.getElementById('status-indicator');
-
-        // Valeurs affichees
-        this.setupValueDisplays();
-    }
-
-    setupValueDisplays() {
-        const sliders = [
-            'kp', 'ki', 'kd', 'mc', 'mp', 'l', 'b', 'g', 'fmax', 'dt'
-        ];
-
-        sliders.forEach(name => {
-            const slider = document.getElementById(`${name}-slider`);
-            const display = document.getElementById(`${name}-value`);
-
+        SLIDERS.forEach(name => {
+            const slider = this.$(`${name}-slider`);
             slider.addEventListener('input', () => {
-                let value = parseFloat(slider.value);
-                if (name === 'dt') {
-                    display.textContent = value.toString();
-                } else {
-                    display.textContent = value.toFixed(2);
-                }
+                this.refreshValue(name);
+                if (['kp', 'ki', 'kd', 'kx', 'kv'].includes(name)) this.pidPreset.value = 'custom';
             });
+            this.refreshValue(name);
         });
-    }
 
-    setupEventListeners() {
-        // Controles principaux
         this.playBtn.addEventListener('click', () => this.onPlay());
         this.pauseBtn.addEventListener('click', () => this.onPause());
         this.resetBtn.addEventListener('click', () => this.onReset());
         this.impulseBtn.addEventListener('click', () => this.onImpulse());
-
-        // Mode
-        this.strictModeBtn.addEventListener('click', () => this.setMode('strict'));
-        this.projectModeBtn.addEventListener('click', () => this.setMode('project'));
-
-        // Auto-tune
+        this.strictModeBtn.addEventListener('click', () => { this.setMode('strict'); this.onModeChange(); });
+        this.projectModeBtn.addEventListener('click', () => { this.setMode('project'); this.onModeChange(); });
         this.autoTuneBtn.addEventListener('click', () => this.onAutoTune());
-
-        // Presets PID
         this.pidPreset.addEventListener('change', () => this.onPresetChange());
-
-        // Scenarios
         this.scenarioSelect.addEventListener('change', () => this.onScenarioChange());
+    }
+
+    refreshValue(name) {
+        const v = parseFloat(this.$(`${name}-slider`).value);
+        this.$(`${name}-value`).textContent = name === 'dt' ? `${v} ms` : v.toFixed(2);
     }
 
     setMode(mode) {
@@ -338,84 +265,65 @@ class UI {
         this.projectModeBtn.classList.toggle('active', mode === 'project');
     }
 
-    // Callbacks (a implementer par l'application principale)
-    onPlay() { console.log('Play'); }
-    onPause() { console.log('Pause'); }
-    onReset() { console.log('Reset'); }
-    onImpulse() { console.log('Impulse'); }
-    onAutoTune() { console.log('Auto-tune'); }
-    onPresetChange() { console.log('Preset change'); }
-    onScenarioChange() { console.log('Scenario change'); }
+    // Callbacks branches par l'application
+    onPlay() {}
+    onPause() {}
+    onReset() {}
+    onImpulse() {}
+    onAutoTune() {}
+    onPresetChange() {}
+    onScenarioChange() {}
+    onModeChange() {}
 
-    // Met a jour les indicateurs de performance
-    updateIndicators(metrics) {
-        this.updateIndicator('stability', metrics.stabilityTime, metrics.stabilityStatus);
-        this.updateIndicator('angle', metrics.maxAngle, metrics.angleStatus);
-        this.updateIndicator('rise', metrics.riseTime, metrics.riseStatus);
-        this.updateIndicator('error', metrics.steadyError, metrics.errorStatus);
-        this.updateIndicator('status', metrics.systemStatus, metrics.overallStatus);
+    updateIndicators(m) {
+        this.$('stability-time').textContent = m.stabilityTime !== null ? `${m.stabilityTime.toFixed(2)} s` : '-- s';
+        this.$('max-angle').textContent = `${m.maxAngle.toFixed(3)} rad`;
+        this.$('rise-time').textContent = m.riseTime !== null ? `${m.riseTime.toFixed(2)} s` : '-- s';
+        this.$('steady-error').textContent = m.steadyError !== null ? `${m.steadyError.toFixed(1)} %` : '-- %';
+        this.$('system-status').textContent = m.systemStatus;
+        this.$('force-value').textContent = `${m.force.toFixed(1)} N`;
+
+        this.setStatus('stability', m.stabilityStatus);
+        this.setStatus('angle', m.angleStatus);
+        this.setStatus('rise', m.riseStatus);
+        this.setStatus('error', m.errorStatus);
+        this.setStatus('status', m.overallStatus);
+
+        const projectOnly = this.mode !== 'project';
+        this.$('rise-indicator').style.opacity = projectOnly ? 0.4 : 1;
+        this.$('error-indicator').style.opacity = projectOnly ? 0.4 : 1;
     }
 
-    updateIndicator(type, value, status) {
-        const indicator = document.getElementById(`${type}-indicator`);
-        const valueElement = document.getElementById(`${type === 'status' ? 'system-status' : type + '-time'}`);
+    setStatus(type, status) {
+        const el = this.$(`${type}-indicator`);
+        el.className = 'indicator' + (status ? ` ${status}` : '');
+    }
 
-        if (type === 'status') {
-            valueElement.textContent = value;
-        } else if (type === 'angle') {
-            document.getElementById('max-angle').textContent = `${value.toFixed(3)} rad`;
-        } else if (type === 'error') {
-            document.getElementById('steady-error').textContent = `${value.toFixed(1)}%`;
-        } else {
-            valueElement.textContent = value !== null ? `${value.toFixed(2)} s` : '-- s';
+    getGains() {
+        const v = (n) => parseFloat(this.$(`${n}-slider`).value);
+        return { kp: v('kp'), ki: v('ki'), kd: v('kd'), kx: v('kx'), kv: v('kv') };
+    }
+
+    setGains(gains) {
+        for (const k of ['kp', 'ki', 'kd', 'kx', 'kv']) {
+            const slider = this.$(`${k}-slider`);
+            // Elargit la plage si le gain calcule depasse le max du slider
+            if (gains[k] > parseFloat(slider.max)) slider.max = Math.ceil(gains[k] * 1.5);
+            slider.value = gains[k];
+            this.refreshValue(k);
         }
-
-        // Met a jour les classes CSS
-        indicator.className = 'indicator';
-        if (status === 'success') indicator.classList.add('success');
-        else if (status === 'warning') indicator.classList.add('warning');
-        else if (status === 'danger') indicator.classList.add('danger');
-    }
-
-    // Getters pour les parametres
-    getPIDParams() {
-        return {
-            kp: parseFloat(this.kpSlider.value),
-            ki: parseFloat(this.kiSlider.value),
-            kd: parseFloat(this.kdSlider.value)
-        };
     }
 
     getSystemParams() {
-        return {
-            mc: parseFloat(this.mcSlider.value),
-            mp: parseFloat(this.mpSlider.value),
-            l: parseFloat(this.lSlider.value),
-            b: parseFloat(this.bSlider.value),
-            g: parseFloat(this.gSlider.value),
-            fMax: parseFloat(this.fmaxSlider.value)
-        };
+        const v = (n) => parseFloat(this.$(`${n}-slider`).value);
+        return { mc: v('mc'), mp: v('mp'), l: v('l'), b: v('b'), c: v('c'), g: v('g'), fMax: v('fmax') };
     }
 
     getSimulationParams() {
         return {
-            dt: parseFloat(this.dtSlider.value) / 1000, // ms vers s
+            dt: parseFloat(this.$('dt-slider').value) / 1000, // ms -> s
             integrator: this.integratorSelect.value
         };
-    }
-
-    // Setters pour mettre a jour l'interface
-    setPIDParams(params) {
-        this.kpSlider.value = params.kp;
-        this.kiSlider.value = params.ki;
-        this.kdSlider.value = params.kd;
-
-        // Declenche les evenements pour mettre a jour l'affichage
-        this.kpSlider.dispatchEvent(new Event('input'));
-        this.kiSlider.dispatchEvent(new Event('input'));
-        this.kdSlider.dispatchEvent(new Event('input'));
-
-        this.pidPreset.value = 'custom';
     }
 }
 
@@ -425,461 +333,337 @@ class Animation {
         this.canvas = document.getElementById(canvasId);
         this.ctx = this.canvas.getContext('2d');
 
-        // Parametres d'affichage
-        this.scale = 150; // pixels par metre (reduit pour garder le pendule visible)
+        this.scale = 150; // pixels par metre
         this.centerX = this.canvas.width / 2;
-        this.centerY = this.canvas.height / 2; // Centre verticalement
+        this.cartY = this.canvas.height * 0.68; // le pendule monte au-dessus du chariot
 
-        // Parametres visuels
-        this.cartWidth = 60;
+        this.cartWidth = 70;
         this.cartHeight = 30;
-        this.poleWidth = 4;
-        this.railY = this.centerY + this.cartHeight / 2;
+        this.wheelRadius = 8;
+        this.railY = this.cartY + this.cartHeight / 2 + this.wheelRadius;
 
-        // Variables d'interactivite
         this.isDragging = false;
-        this.dragTarget = null; // 'cart' ou 'pendulum'
-        this.lastMouseX = 0;
-        this.lastMouseY = 0;
-        this.mouseForce = 0;
+        this.dragTarget = null; // 'cart' | 'pendulum'
+        this.mouseX = -1;
+        this.mouseY = -1;
 
-        // Callbacks pour l'interactivite
         this.onCartDrag = null;
         this.onPendulumDrag = null;
-        this.onMouseForce = null;
+        this.onDragEnd = null;
+
+        this.currentX = 0;
+        this.currentTheta = 0;
+        this.currentL = 0.5;
 
         this.setupInteraction();
     }
 
     setupInteraction() {
-        // Gestion des evenements souris
-        this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
-        this.canvas.addEventListener('mousemove', (e) => this.onMouseMove(e));
-        this.canvas.addEventListener('mouseup', (e) => this.onMouseUp(e));
-        this.canvas.addEventListener('mouseleave', (e) => this.onMouseUp(e));
-
-        // Gestion tactile pour mobile
-        this.canvas.addEventListener('touchstart', (e) => this.onTouchStart(e));
-        this.canvas.addEventListener('touchmove', (e) => this.onTouchMove(e));
-        this.canvas.addEventListener('touchend', (e) => this.onTouchEnd(e));
-
-        // Style du curseur
-        this.canvas.style.cursor = 'grab';
+        const c = this.canvas;
+        c.addEventListener('mousedown', (e) => this.start(this.pos(e)));
+        c.addEventListener('mousemove', (e) => this.move(this.pos(e)));
+        c.addEventListener('mouseup', () => this.end());
+        c.addEventListener('mouseleave', () => this.end());
+        c.addEventListener('touchstart', (e) => { e.preventDefault(); this.start(this.pos(e.touches[0])); }, { passive: false });
+        c.addEventListener('touchmove', (e) => { e.preventDefault(); this.move(this.pos(e.touches[0])); }, { passive: false });
+        c.addEventListener('touchend', (e) => { e.preventDefault(); this.end(); }, { passive: false });
     }
 
-    getMousePos(e) {
-        const rect = this.canvas.getBoundingClientRect();
+    // Coordonnees souris -> coordonnees canvas (tient compte du redimensionnement CSS)
+    pos(e) {
+        const r = this.canvas.getBoundingClientRect();
         return {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top
+            x: (e.clientX - r.left) * this.canvas.width / r.width,
+            y: (e.clientY - r.top) * this.canvas.height / r.height
         };
     }
 
-    getTouchPos(e) {
-        const rect = this.canvas.getBoundingClientRect();
+    cartPx() { return this.centerX + this.currentX * this.scale; }
+
+    bobPx() {
+        const L = this.currentL * this.scale;
         return {
-            x: e.touches[0].clientX - rect.left,
-            y: e.touches[0].clientY - rect.top
+            x: this.cartPx() + L * Math.sin(this.currentTheta),
+            y: this.cartY - L * Math.cos(this.currentTheta)
         };
     }
 
-    isPointInCart(x, y, cartX, cartY) {
-        return x >= cartX - this.cartWidth / 2 &&
-               x <= cartX + this.cartWidth / 2 &&
-               y >= cartY - this.cartHeight / 2 &&
-               y <= cartY + this.cartHeight / 2;
+    hitCart(x, y) {
+        const cx = this.cartPx();
+        return Math.abs(x - cx) <= this.cartWidth / 2 && Math.abs(y - this.cartY) <= this.cartHeight / 2;
     }
 
-    isPointInPendulum(x, y, pendulumX, pendulumY) {
-        const radius = 15; // Rayon de detection autour de la masse
-        const dx = x - pendulumX;
-        const dy = y - pendulumY;
-        return dx * dx + dy * dy <= radius * radius;
+    hitBob(x, y) {
+        const b = this.bobPx();
+        return (x - b.x) ** 2 + (y - b.y) ** 2 <= 18 * 18;
     }
 
-    onMouseDown(e) {
-        const pos = this.getMousePos(e);
-        this.startInteraction(pos.x, pos.y);
+    start({ x, y }) {
+        if (this.hitBob(x, y)) this.dragTarget = 'pendulum';
+        else if (this.hitCart(x, y)) this.dragTarget = 'cart';
+        else return;
+        this.isDragging = true;
+        this.canvas.style.cursor = 'grabbing';
+        this.mouseX = x; this.mouseY = y;
     }
 
-    onTouchStart(e) {
-        e.preventDefault();
-        const pos = this.getTouchPos(e);
-        this.startInteraction(pos.x, pos.y);
-    }
-
-    startInteraction(x, y) {
-        // Calcule les positions actuelles
-        const cartX = this.centerX + this.currentX * this.scale;
-        const cartY = this.centerY;
-
-        const poleLength = this.currentL * this.scale;
-        const poleEndX = cartX + poleLength * Math.sin(this.currentTheta);
-        const poleEndY = cartY - poleLength * Math.cos(this.currentTheta);
-
-        // Detecte quel element est clique
-        if (this.isPointInPendulum(x, y, poleEndX, poleEndY)) {
-            this.isDragging = true;
-            this.dragTarget = 'pendulum';
-            this.canvas.style.cursor = 'grabbing';
-        } else if (this.isPointInCart(x, y, cartX, cartY)) {
-            this.isDragging = true;
-            this.dragTarget = 'cart';
-            this.canvas.style.cursor = 'grabbing';
-        }
-
-        this.lastMouseX = x;
-        this.lastMouseY = y;
-    }
-
-    onMouseMove(e) {
-        const pos = this.getMousePos(e);
-        this.handleInteraction(pos.x, pos.y);
-    }
-
-    onTouchMove(e) {
-        e.preventDefault();
-        const pos = this.getTouchPos(e);
-        this.handleInteraction(pos.x, pos.y);
-    }
-
-    handleInteraction(x, y) {
+    move({ x, y }) {
         if (!this.isDragging) {
-            // Change le curseur selon l'element survole
-            const cartX = this.centerX + this.currentX * this.scale;
-            const cartY = this.centerY;
-
-            const poleLength = this.currentL * this.scale;
-            const poleEndX = cartX + poleLength * Math.sin(this.currentTheta);
-            const poleEndY = cartY - poleLength * Math.cos(this.currentTheta);
-
-            if (this.isPointInPendulum(x, y, poleEndX, poleEndY) ||
-                this.isPointInCart(x, y, cartX, cartY)) {
-                this.canvas.style.cursor = 'grab';
-            } else {
-                this.canvas.style.cursor = 'default';
-            }
+            this.canvas.style.cursor = (this.hitBob(x, y) || this.hitCart(x, y)) ? 'grab' : 'default';
+            this.mouseX = x; this.mouseY = y;
             return;
         }
-
-        const deltaX = x - this.lastMouseX;
-        const deltaY = y - this.lastMouseY;
-
-        if (this.dragTarget === 'cart') {
-            // Deplacement du chariot
-            const deltaPos = deltaX / this.scale;
-            if (this.onCartDrag) {
-                this.onCartDrag(deltaPos);
-            }
-        } else if (this.dragTarget === 'pendulum') {
-            // Rotation du pendule
-            const cartX = this.centerX + this.currentX * this.scale;
-            const cartY = this.centerY;
-
-            // Calcule l'angle base sur la position de la souris
-            const dx = x - cartX;
-            const dy = cartY - y; // Inverse car y croit vers le bas
-            const newTheta = Math.atan2(dx, dy);
-
-            if (this.onPendulumDrag) {
-                this.onPendulumDrag(newTheta);
-            }
+        if (this.dragTarget === 'cart' && this.onCartDrag) {
+            this.onCartDrag((x - this.mouseX) / this.scale);
+        } else if (this.dragTarget === 'pendulum' && this.onPendulumDrag) {
+            this.onPendulumDrag(Math.atan2(x - this.cartPx(), this.cartY - y));
         }
-
-        this.lastMouseX = x;
-        this.lastMouseY = y;
+        this.mouseX = x; this.mouseY = y;
     }
 
-    onMouseUp(e) {
-        this.endInteraction();
-    }
-
-    onTouchEnd(e) {
-        e.preventDefault();
-        this.endInteraction();
-    }
-
-    endInteraction() {
+    end() {
+        if (this.isDragging && this.onDragEnd) this.onDragEnd();
         this.isDragging = false;
         this.dragTarget = null;
         this.canvas.style.cursor = 'default';
     }
 
-    draw(x, theta, l, targetX = null) {
-        // Stocke les valeurs actuelles pour l'interactivite
+    draw(x, theta, l, force, targetX = null) {
         this.currentX = x;
         this.currentTheta = theta;
         this.currentL = l;
 
-        // Efface le canvas
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        const ctx = this.ctx;
+        ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-        // Dessine le rail
         this.drawRail();
+        if (targetX !== null) this.drawTarget(this.centerX + targetX * this.scale);
 
-        // Position du chariot en pixels
-        const cartX = this.centerX + x * this.scale;
-
-        // Dessine le chariot
-        this.drawCart(cartX, this.centerY);
-
-        // Dessine le pendule
-        this.drawPole(cartX, this.centerY, theta, l);
-
-        // Dessine la cible si mode projet
-        if (targetX !== null) {
-            this.drawTarget(this.centerX + targetX * this.scale, this.centerY);
-        }
-
-        // Affiche les valeurs
-        this.drawValues(x, theta);
-
-        // Affiche les instructions d'interactivite
+        const cartX = this.cartPx();
+        this.drawForce(cartX, force);
+        this.drawCart(cartX);
+        this.drawPole(cartX);
+        this.drawValues(x, theta, force);
         this.drawInstructions();
     }
 
     drawRail() {
-        this.ctx.strokeStyle = '#34495e';
-        this.ctx.lineWidth = 3;
-        this.ctx.beginPath();
-        this.ctx.moveTo(50, this.railY);
-        this.ctx.lineTo(this.canvas.width - 50, this.railY);
-        this.ctx.stroke();
+        const ctx = this.ctx;
+        ctx.strokeStyle = '#34495e';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(50, this.railY);
+        ctx.lineTo(this.canvas.width - 50, this.railY);
+        ctx.stroke();
+
+        // Graduations tous les 0.5 m
+        ctx.fillStyle = '#95a5a6';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'center';
+        for (let m = -2; m <= 2; m += 0.5) {
+            const px = this.centerX + m * this.scale;
+            ctx.fillRect(px - 1, this.railY, 2, m % 1 === 0 ? 10 : 6);
+            if (m % 1 === 0) ctx.fillText(`${m} m`, px, this.railY + 24);
+        }
+        ctx.textAlign = 'left';
     }
 
-    drawCart(x, y) {
-        // Surbrillance si survole ou en cours de deplacement
-        const isHighlighted = this.dragTarget === 'cart' ||
-            (!this.isDragging && this.isPointInCart(this.lastMouseX, this.lastMouseY, x, y));
+    drawCart(x) {
+        const ctx = this.ctx, w = this.cartWidth, h = this.cartHeight, y = this.cartY;
+        const hl = this.dragTarget === 'cart' || (!this.isDragging && this.hitCart(this.mouseX, this.mouseY));
 
-        this.ctx.fillStyle = isHighlighted ? '#2980b9' : '#3498db';
-        this.ctx.fillRect(
-            x - this.cartWidth / 2,
-            y - this.cartHeight / 2,
-            this.cartWidth,
-            this.cartHeight
-        );
-
-        // Contour si survole
-        if (isHighlighted) {
-            this.ctx.strokeStyle = '#1abc9c';
-            this.ctx.lineWidth = 2;
-            this.ctx.strokeRect(
-                x - this.cartWidth / 2,
-                y - this.cartHeight / 2,
-                this.cartWidth,
-                this.cartHeight
-            );
+        ctx.fillStyle = hl ? '#2980b9' : '#3498db';
+        ctx.fillRect(x - w / 2, y - h / 2, w, h);
+        if (hl) {
+            ctx.strokeStyle = '#1abc9c';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x - w / 2, y - h / 2, w, h);
         }
 
-        // Roues
-        this.ctx.fillStyle = '#2c3e50';
-        const wheelRadius = 8;
-
-        // Roue gauche
-        this.ctx.beginPath();
-        this.ctx.arc(x - this.cartWidth / 3, y + this.cartHeight / 2, wheelRadius, 0, 2 * Math.PI);
-        this.ctx.fill();
-
-        // Roue droite
-        this.ctx.beginPath();
-        this.ctx.arc(x + this.cartWidth / 3, y + this.cartHeight / 2, wheelRadius, 0, 2 * Math.PI);
-        this.ctx.fill();
+        ctx.fillStyle = '#2c3e50';
+        for (const dx of [-w / 3, w / 3]) {
+            ctx.beginPath();
+            ctx.arc(x + dx, y + h / 2, this.wheelRadius, 0, 2 * Math.PI);
+            ctx.fill();
+        }
     }
 
-    drawPole(cartX, cartY, theta, l) {
-        const poleLength = l * this.scale;
-        const poleEndX = cartX + poleLength * Math.sin(theta);
-        const poleEndY = cartY - poleLength * Math.cos(theta);
+    drawPole(cartX) {
+        const ctx = this.ctx;
+        const bob = this.bobPx();
 
-        // Tige du pendule
-        this.ctx.strokeStyle = '#e74c3c';
-        this.ctx.lineWidth = this.poleWidth;
-        this.ctx.beginPath();
-        this.ctx.moveTo(cartX, cartY);
-        this.ctx.lineTo(poleEndX, poleEndY);
-        this.ctx.stroke();
+        ctx.strokeStyle = '#e74c3c';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(cartX, this.cartY);
+        ctx.lineTo(bob.x, bob.y);
+        ctx.stroke();
 
-        // Surbrillance de la masse si survole ou en cours de deplacement
-        const isHighlighted = this.dragTarget === 'pendulum' ||
-            (!this.isDragging && this.isPointInPendulum(this.lastMouseX, this.lastMouseY, poleEndX, poleEndY));
-
-        // Masse du pendule
-        this.ctx.fillStyle = isHighlighted ? '#c0392b' : '#e74c3c';
-        this.ctx.beginPath();
-        this.ctx.arc(poleEndX, poleEndY, 12, 0, 2 * Math.PI);
-        this.ctx.fill();
-
-        // Contour si survole
-        if (isHighlighted) {
-            this.ctx.strokeStyle = '#1abc9c';
-            this.ctx.lineWidth = 2;
-            this.ctx.beginPath();
-            this.ctx.arc(poleEndX, poleEndY, 12, 0, 2 * Math.PI);
-            this.ctx.stroke();
+        const hl = this.dragTarget === 'pendulum' || (!this.isDragging && this.hitBob(this.mouseX, this.mouseY));
+        ctx.fillStyle = hl ? '#c0392b' : '#e74c3c';
+        ctx.beginPath();
+        ctx.arc(bob.x, bob.y, 12, 0, 2 * Math.PI);
+        ctx.fill();
+        if (hl) {
+            ctx.strokeStyle = '#1abc9c';
+            ctx.lineWidth = 2;
+            ctx.stroke();
         }
 
-        // Axe de rotation
-        this.ctx.fillStyle = '#2c3e50';
-        this.ctx.beginPath();
-        this.ctx.arc(cartX, cartY, 6, 0, 2 * Math.PI);
-        this.ctx.fill();
+        ctx.fillStyle = '#2c3e50';
+        ctx.beginPath();
+        ctx.arc(cartX, this.cartY, 6, 0, 2 * Math.PI);
+        ctx.fill();
     }
 
-    drawTarget(x, y) {
-        this.ctx.strokeStyle = '#27ae60';
-        this.ctx.lineWidth = 2;
-        this.ctx.setLineDash([5, 5]);
-
-        // Ligne verticale de la cible
-        this.ctx.beginPath();
-        this.ctx.moveTo(x, y - 40);
-        this.ctx.lineTo(x, y + 40);
-        this.ctx.stroke();
-
-        this.ctx.setLineDash([]);
+    drawForce(cartX, F) {
+        if (Math.abs(F) < 0.05) return;
+        const ctx = this.ctx, s = Math.sign(F);
+        const len = Math.min(120, Math.abs(F) * 3);
+        const x0 = cartX - s * (this.cartWidth / 2 + len + 4);
+        const x1 = cartX - s * (this.cartWidth / 2 + 4);
+        const y = this.cartY;
+        ctx.strokeStyle = ctx.fillStyle = '#27ae60';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(x0, y);
+        ctx.lineTo(x1, y);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(x1 - 9 * s, y - 6);
+        ctx.lineTo(x1 - 9 * s, y + 6);
+        ctx.closePath();
+        ctx.fill();
     }
 
-    drawValues(x, theta) {
-        this.ctx.fillStyle = '#2c3e50';
-        this.ctx.font = '14px monospace';
+    drawTarget(x) {
+        const ctx = this.ctx;
+        ctx.strokeStyle = '#27ae60';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.beginPath();
+        ctx.moveTo(x, this.railY - 120);
+        ctx.lineTo(x, this.railY + 10);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
 
-        const xText = `x = ${x.toFixed(3)} m`;
-        const thetaText = `θ = ${theta.toFixed(3)} rad (${(theta * 180 / Math.PI).toFixed(1)}°)`;
-
-        this.ctx.fillText(xText, 10, 25);
-        this.ctx.fillText(thetaText, 10, 45);
+    drawValues(x, theta, F) {
+        const ctx = this.ctx;
+        ctx.fillStyle = '#2c3e50';
+        ctx.font = '14px monospace';
+        ctx.fillText(`x = ${x.toFixed(3)} m`, 10, 25);
+        ctx.fillText(`θ = ${theta.toFixed(3)} rad (${(theta * 180 / Math.PI).toFixed(1)}°)`, 10, 45);
+        ctx.fillText(`F = ${F.toFixed(2)} N`, 10, 65);
     }
 
     drawInstructions() {
-        this.ctx.fillStyle = '#7f8c8d';
-        this.ctx.font = '12px sans-serif';
-        this.ctx.textAlign = 'right';
-
-        const instructions = [
-            'Cliquez et glissez:',
-            '• Chariot pour le deplacer',
-            '• Masse pour changer l\'angle'
-        ];
-
-        instructions.forEach((text, index) => {
-            this.ctx.fillText(text, this.canvas.width - 10, this.canvas.height - 40 + index * 15);
-        });
-
-        this.ctx.textAlign = 'left';
+        const ctx = this.ctx;
+        ctx.fillStyle = '#7f8c8d';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'right';
+        ['Glisser le chariot ou la masse', '← / → : pousser le chariot']
+            .forEach((t, i) => ctx.fillText(t, this.canvas.width - 10, 20 + i * 15));
+        ctx.textAlign = 'left';
     }
 }
 
-// ===== MODULE PLOTS (inchange) =====
+// ===== MODULE PLOTS =====
 class Plotter {
-    constructor(canvasId, title, unit, color, timeWindow = 15) {
+    constructor(canvasId, title, unit, color, timeWindow = 10) {
         this.canvas = document.getElementById(canvasId);
         this.ctx = this.canvas.getContext('2d');
         this.title = title;
         this.unit = unit;
         this.color = color;
         this.timeWindow = timeWindow;
-
         this.data = [];
-        this.maxDataPoints = timeWindow * 100;
+        this.reference = null;
     }
 
-    addPoint(time, value) {
-        this.data.push({ t: time, y: value });
-
-        while (this.data.length > 0 && this.data[0].t < time - this.timeWindow) {
-            this.data.shift();
-        }
+    addPoint(t, y) {
+        // Sous-echantillonnage : 1 point toutes les 20 ms suffit pour l'affichage
+        const last = this.data[this.data.length - 1];
+        if (last && t - last.t < 0.02) return;
+        this.data.push({ t, y });
+        while (this.data.length && this.data[0].t < t - this.timeWindow) this.data.shift();
     }
 
     draw() {
-        if (this.data.length === 0) return;
+        const ctx = this.ctx, W = this.canvas.width, H = this.canvas.height;
+        ctx.clearRect(0, 0, W, H);
 
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+        const m = { top: 30, right: 20, bottom: 40, left: 60 };
+        const pw = W - m.left - m.right, ph = H - m.top - m.bottom;
 
-        const margin = { top: 30, right: 20, bottom: 40, left: 60 };
-        const plotWidth = this.canvas.width - margin.left - margin.right;
-        const plotHeight = this.canvas.height - margin.top - margin.bottom;
-
-        const timeRange = this.timeWindow;
+        const tNow = this.data.length ? this.data[this.data.length - 1].t : 0;
+        const tStart = Math.max(0, tNow - this.timeWindow);
         const values = this.data.map(d => d.y);
-        const yMin = Math.min(...values) * 1.1;
-        const yMax = Math.max(...values) * 1.1;
-        const yRange = yMax - yMin || 1;
+        if (this.reference !== null) values.push(this.reference);
+        let yMin = Math.min(0, ...values), yMax = Math.max(0, ...values);
+        const pad = Math.max((yMax - yMin) * 0.1, 0.01);
+        yMin -= pad; yMax += pad;
 
-        this.drawAxes(margin, plotWidth, plotHeight, yMin, yMax);
-        this.drawCurve(margin, plotWidth, plotHeight, timeRange, yMin, yRange);
+        const X = (t) => m.left + pw * (t - tStart) / this.timeWindow;
+        const Y = (v) => m.top + ph * (yMax - v) / (yMax - yMin);
 
-        this.ctx.fillStyle = '#2c3e50';
-        this.ctx.font = 'bold 16px sans-serif';
-        this.ctx.textAlign = 'center';
-        this.ctx.fillText(this.title, this.canvas.width / 2, 20);
-    }
+        // Axes + graduations
+        ctx.strokeStyle = '#34495e';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(m.left, m.top);
+        ctx.lineTo(m.left, m.top + ph);
+        ctx.lineTo(m.left + pw, m.top + ph);
+        ctx.stroke();
 
-    drawAxes(margin, plotWidth, plotHeight, yMin, yMax) {
-        this.ctx.strokeStyle = '#34495e';
-        this.ctx.lineWidth = 1;
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(margin.left, margin.top);
-        this.ctx.lineTo(margin.left, margin.top + plotHeight);
-        this.ctx.stroke();
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(margin.left, margin.top + plotHeight);
-        this.ctx.lineTo(margin.left + plotWidth, margin.top + plotHeight);
-        this.ctx.stroke();
-
-        this.ctx.fillStyle = '#7f8c8d';
-        this.ctx.font = '12px sans-serif';
-        this.ctx.textAlign = 'right';
-
+        ctx.fillStyle = '#7f8c8d';
+        ctx.font = '12px sans-serif';
+        ctx.textAlign = 'right';
         for (let i = 0; i <= 4; i++) {
-            const y = margin.top + (plotHeight * i) / 4;
-            const value = yMax - (yMax - yMin) * i / 4;
-            this.ctx.fillText(value.toFixed(2), margin.left - 5, y + 4);
+            const v = yMax - (yMax - yMin) * i / 4;
+            ctx.fillText(v.toFixed(2), m.left - 5, Y(v) + 4);
         }
-
-        this.ctx.save();
-        this.ctx.translate(15, margin.top + plotHeight / 2);
-        this.ctx.rotate(-Math.PI / 2);
-        this.ctx.textAlign = 'center';
-        this.ctx.fillText(this.unit, 0, 0);
-        this.ctx.restore();
-
-        this.ctx.textAlign = 'center';
-        const currentTime = this.data.length > 0 ? this.data[this.data.length - 1].t : 0;
-
+        ctx.textAlign = 'center';
         for (let i = 0; i <= 5; i++) {
-            const x = margin.left + (plotWidth * i) / 5;
-            const time = currentTime - this.timeWindow + (this.timeWindow * i) / 5;
-            this.ctx.fillText(time.toFixed(1), x, margin.top + plotHeight + 20);
+            const t = tStart + this.timeWindow * i / 5;
+            ctx.fillText(t.toFixed(1), X(t), m.top + ph + 18);
+        }
+        ctx.fillText('Temps (s)', m.left + pw / 2, H - 5);
+        ctx.save();
+        ctx.translate(15, m.top + ph / 2);
+        ctx.rotate(-Math.PI / 2);
+        ctx.fillText(this.unit, 0, 0);
+        ctx.restore();
+
+        // Zero et reference
+        ctx.strokeStyle = '#ecf0f1';
+        ctx.beginPath();
+        ctx.moveTo(m.left, Y(0));
+        ctx.lineTo(m.left + pw, Y(0));
+        ctx.stroke();
+        if (this.reference !== null) {
+            ctx.strokeStyle = '#27ae60';
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(m.left, Y(this.reference));
+            ctx.lineTo(m.left + pw, Y(this.reference));
+            ctx.stroke();
+            ctx.setLineDash([]);
         }
 
-        this.ctx.fillText('Temps (s)', margin.left + plotWidth / 2, this.canvas.height - 5);
-    }
+        // Courbe
+        if (this.data.length > 1) {
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            this.data.forEach((d, i) => (i ? ctx.lineTo(X(d.t), Y(d.y)) : ctx.moveTo(X(d.t), Y(d.y))));
+            ctx.stroke();
+        }
 
-    drawCurve(margin, plotWidth, plotHeight, timeRange, yMin, yRange) {
-        if (this.data.length < 2) return;
-
-        this.ctx.strokeStyle = this.color;
-        this.ctx.lineWidth = 2;
-        this.ctx.beginPath();
-
-        const currentTime = this.data[this.data.length - 1].t;
-
-        this.data.forEach((point, index) => {
-            const x = margin.left + plotWidth * (point.t - (currentTime - timeRange)) / timeRange;
-            const y = margin.top + plotHeight - (plotHeight * (point.y - yMin) / yRange);
-
-            if (index === 0) {
-                this.ctx.moveTo(x, y);
-            } else {
-                this.ctx.lineTo(x, y);
-            }
-        });
-
-        this.ctx.stroke();
+        ctx.fillStyle = '#2c3e50';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.fillText(this.title, W / 2, 20);
     }
 
     clear() {
@@ -887,145 +671,89 @@ class Plotter {
     }
 }
 
-// ===== MODULE PERFORMANCE (inchange) =====
+// ===== MODULE PERFORMANCE =====
 class PerformanceMonitor {
     constructor() {
         this.reset();
     }
 
-    reset() {
-        this.startTime = null;
+    reset(mode = 'strict', initialX = 0) {
+        this.mode = mode;
+        this.initialX = initialX;
         this.stabilizationTime = null;
+        this.stableSince = null;
         this.riseTime = null;
         this.maxAngle = 0;
-        this.steadyStateError = 0;
-        this.mode = 'strict';
-
-        this.angleHistory = [];
-        this.positionHistory = [];
-        this.timeHistory = [];
+        this.steadyError = null;
+        this.fallen = false;
+        this.positions = [];
     }
 
-    setMode(mode) {
-        this.mode = mode;
-    }
+    update(t, x, theta, targetX) {
+        const th = Math.abs(theta);
+        this.maxAngle = Math.max(this.maxAngle, th);
+        if (th > Math.PI / 2) this.fallen = true;
 
-    update(time, x, theta, targetX = 0, targetTheta = 0) {
-        if (this.startTime === null) {
-            this.startTime = time;
+        // Stabilise = |theta| < seuil et x proche de la cible pendant 1 s
+        const thetaTol = this.mode === 'strict' ? 0.05 : 0.35;
+        const ok = th < thetaTol && Math.abs(x - targetX) < 0.05;
+        if (!ok) {
+            this.stableSince = null;
+            if (this.stabilizationTime !== null && th > 0.35) this.stabilizationTime = null;
+        } else if (this.stableSince === null) {
+            this.stableSince = t;
+        } else if (this.stabilizationTime === null && t - this.stableSince >= 1.0) {
+            this.stabilizationTime = this.stableSince;
         }
-
-        const t = time - this.startTime;
-
-        this.timeHistory.push(t);
-        this.angleHistory.push(Math.abs(theta));
-        this.positionHistory.push(x);
-
-        while (this.timeHistory.length > 0 && this.timeHistory[0] < t - 10) {
-            this.timeHistory.shift();
-            this.angleHistory.shift();
-            this.positionHistory.shift();
-        }
-
-        this.maxAngle = Math.max(this.maxAngle, Math.abs(theta));
-
-        this.checkStabilization(t, theta, targetTheta);
 
         if (this.mode === 'project') {
-            this.checkRiseTime(t, x, targetX);
-            this.calculateSteadyStateError(x, targetX);
-        }
-
-        return this.getMetrics();
-    }
-
-    checkStabilization(t, theta, targetTheta) {
-        const threshold = this.mode === 'strict' ? 0.05 : 0.35;
-        const windowSize = 1.0;
-
-        if (this.angleHistory.length < 2) return;
-
-        const recentAngles = this.angleHistory.slice(-Math.floor(windowSize * 100));
-        const isStable = recentAngles.every(angle => angle <= threshold);
-
-        if (isStable && this.stabilizationTime === null && t > windowSize) {
-            this.stabilizationTime = t;
+            const span = targetX - this.initialX;
+            if (this.riseTime === null && Math.abs(span) > 1e-6 && (x - this.initialX) / span >= 0.9) {
+                this.riseTime = t;
+            }
+            // Erreur statique moyenne sur la derniere seconde
+            this.positions.push({ t, x });
+            while (this.positions.length && this.positions[0].t < t - 1) this.positions.shift();
+            if (t > 2 && Math.abs(span) > 1e-6) {
+                const avg = this.positions.reduce((s, p) => s + p.x, 0) / this.positions.length;
+                this.steadyError = Math.abs(avg - targetX) / Math.abs(span) * 100;
+            }
         }
     }
 
-    checkRiseTime(t, x, targetX) {
-        if (this.riseTime !== null) return;
+    getMetrics(force) {
+        const status = (v, thr) => (v === null ? null : v <= thr ? 'success' : 'danger');
+        const project = this.mode === 'project';
 
-        const threshold = 0.9 * Math.abs(targetX);
-
-        if (Math.abs(x) >= threshold) {
-            this.riseTime = t;
-        }
-    }
-
-    calculateSteadyStateError(x, targetX) {
-        if (this.timeHistory.length < 300) return;
-
-        const recentPositions = this.positionHistory.slice(-300);
-        const avgPosition = recentPositions.reduce((a, b) => a + b, 0) / recentPositions.length;
-
-        this.steadyStateError = Math.abs(avgPosition - targetX) / Math.abs(targetX) * 100;
-    }
-
-    getMetrics() {
-        const criteria = this.mode === 'strict' ?
-            { stabilityTime: 5, angleThreshold: 0.05 } :
-            { stabilityTime: 5, angleThreshold: 0.35, riseTime: 0.5, errorThreshold: 2 };
-
-        return {
+        const m = {
+            force,
             stabilityTime: this.stabilizationTime,
-            stabilityStatus: this.getStatus(this.stabilizationTime, criteria.stabilityTime, true),
-
+            stabilityStatus: status(this.stabilizationTime, 5),
             maxAngle: this.maxAngle,
-            angleStatus: this.getStatus(this.maxAngle, criteria.angleThreshold, false),
-
+            angleStatus: status(this.maxAngle, project ? 0.35 : 0.2),
             riseTime: this.riseTime,
-            riseStatus: this.mode === 'project' ?
-                this.getStatus(this.riseTime, criteria.riseTime, true) : null,
-
-            steadyError: this.steadyStateError,
-            errorStatus: this.mode === 'project' ?
-                this.getStatus(this.steadyStateError, criteria.errorThreshold, false) : null,
-
-            systemStatus: this.getSystemStatus(),
-            overallStatus: this.getOverallStatus()
+            riseStatus: project ? status(this.riseTime, 2) : null,
+            steadyError: this.steadyError,
+            errorStatus: project ? status(this.steadyError, 2) : null
         };
-    }
 
-    getStatus(value, threshold, lowerIsBetter) {
-        if (value === null) return null;
-
-        const isGood = lowerIsBetter ? value <= threshold : value >= threshold;
-        return isGood ? 'success' : 'danger';
-    }
-
-    getSystemStatus() {
-        if (this.maxAngle > Math.PI / 2) return 'Chute detectee';
-        if (this.stabilizationTime !== null) return 'Stabilise';
-        return 'En cours';
-    }
-
-    getOverallStatus() {
-        if (this.maxAngle > Math.PI / 2) return 'danger';
-
-        const metrics = this.getMetrics();
-        if (metrics.stabilityStatus === 'success' &&
-            metrics.angleStatus === 'success' &&
-            (this.mode === 'strict' ||
-             (metrics.riseStatus === 'success' && metrics.errorStatus === 'success'))) {
-            return 'success';
+        if (this.fallen) {
+            m.systemStatus = 'Chute détectée';
+            m.overallStatus = 'danger';
+        } else if (this.stabilizationTime !== null) {
+            m.systemStatus = 'Stabilisé';
+            const allOk = [m.stabilityStatus, m.angleStatus, m.riseStatus, m.errorStatus]
+                .every(s => s === null || s === 'success');
+            m.overallStatus = allOk ? 'success' : 'warning';
+        } else {
+            m.systemStatus = 'En cours';
+            m.overallStatus = 'warning';
         }
-
-        return 'warning';
+        return m;
     }
 }
 
-// ===== APPLICATION PRINCIPALE AVEC INTERACTIVITE =====
+// ===== APPLICATION PRINCIPALE =====
 class InvertedPendulumApp {
     constructor() {
         this.physics = new Physics();
@@ -1039,19 +767,22 @@ class InvertedPendulumApp {
         this.isRunning = false;
         this.animationId = null;
         this.lastTime = 0;
-        this.manualControl = false; // Mode controle manuel
+        this.accumulator = 0;
+        this.pendingImpulseAt = null;
+        this.keys = { left: false, right: false };
+        this.keyForce = 15; // N
 
-        this.setupCallbacks();
-        this.setupInteractivity();
+        this.bindUI();
+        this.bindInteraction();
+        this.bindKeyboard();
+
+        // Gains de depart calcules pour les parametres affiches
+        this.autoTune();
         this.reset();
-
-        // Demarre automatiquement la simulation pour montrer l'animation
-        setTimeout(() => {
-            this.play();
-        }, 1000);
+        this.play();
     }
 
-    setupCallbacks() {
+    bindUI() {
         this.ui.onPlay = () => this.play();
         this.ui.onPause = () => this.pause();
         this.ui.onReset = () => this.reset();
@@ -1059,248 +790,156 @@ class InvertedPendulumApp {
         this.ui.onAutoTune = () => this.autoTune();
         this.ui.onPresetChange = () => this.applyPreset();
         this.ui.onScenarioChange = () => this.loadScenario();
+        this.ui.onModeChange = () => this.reset();
     }
 
-    setupInteractivity() {
-        // Callback pour le deplacement du chariot
-        this.animation.onCartDrag = (deltaPos) => {
-            const newX = this.physics.x + deltaPos;
-            // Limite le deplacement
-            const limitedX = Math.max(-2, Math.min(2, newX));
-            this.physics.setState(limitedX, 0, this.physics.theta, this.physics.theta_dot);
-            this.manualControl = true;
-
-            // Remet le controle automatique apres un delai plus court
-            setTimeout(() => {
-                this.manualControl = false;
-            }, 500);
+    bindInteraction() {
+        // Pendant un glissement la simulation est figee, puis repart a la relache
+        this.animation.onCartDrag = (dx) => {
+            const lim = this.physics.railLimit;
+            this.physics.setState(clamp(this.physics.x + dx, -lim, lim), 0, this.physics.theta, 0);
         };
-
-        // Callback pour la rotation du pendule
-        this.animation.onPendulumDrag = (newTheta) => {
-            // Limite l'angle
-            const limitedTheta = Math.max(-Math.PI/2, Math.min(Math.PI/2, newTheta));
-            this.physics.setState(this.physics.x, this.physics.x_dot, limitedTheta, 0);
-            this.manualControl = true;
-
-            // Remet le controle automatique apres un delai plus court
-            setTimeout(() => {
-                this.manualControl = false;
-            }, 500);
+        this.animation.onPendulumDrag = (theta) => {
+            this.physics.setState(this.physics.x, 0, clamp(theta, -Math.PI / 2, Math.PI / 2), 0);
         };
+        this.animation.onDragEnd = () => {
+            this.controller.reset();
+            this.performance.reset(this.ui.mode, this.physics.x);
+            this.performance.t0 = this.physics.t;
+        };
+    }
+
+    bindKeyboard() {
+        const set = (e, v) => {
+            if (e.target && ['INPUT', 'SELECT'].includes(e.target.tagName)) return;
+            if (e.key === 'ArrowLeft') { this.keys.left = v; e.preventDefault(); }
+            if (e.key === 'ArrowRight') { this.keys.right = v; e.preventDefault(); }
+        };
+        window.addEventListener('keydown', (e) => set(e, true));
+        window.addEventListener('keyup', (e) => set(e, false));
+    }
+
+    get targetX() {
+        return this.ui.mode === 'project' ? 0.2 : 0;
     }
 
     play() {
-        if (!this.isRunning) {
-            this.isRunning = true;
-            this.lastTime = performance.now();
-            this.gameLoop();
-        }
+        if (this.isRunning) return;
+        this.isRunning = true;
+        this.lastTime = performance.now();
+        this.accumulator = 0;
+        this.animationId = requestAnimationFrame((t) => this.loop(t));
     }
 
     pause() {
         this.isRunning = false;
-        if (this.animationId) {
-            cancelAnimationFrame(this.animationId);
-        }
+        if (this.animationId) cancelAnimationFrame(this.animationId);
+        this.animationId = null;
     }
 
     reset() {
-        this.pause();
-
         const scenario = this.ui.scenarioSelect.value;
-        let initialState;
+        // Impulsion : on part a l'equilibre et on perturbe apres 1 s
+        const initial = scenario === 'impulse' ? [0, 0, 0, 0] : [0, 0, 0.1, 0];
 
-        if (scenario === 'impulse') {
-            // Position proche de l'equilibre pour tester l'impulsion
-            initialState = [0, 0, 0.01, 0];
-        } else if (scenario === 'position') {
-            // Position pendante pour le mode projet
-            initialState = [0, 0, 0.1, 0];
-        } else {
-            // Position pendante par defaut - animation spectaculaire
-            initialState = [0, 0, 0.1, 0];
-        }
-
-        this.physics.reset(initialState);
+        this.physics.updateParams(this.ui.getSystemParams());
+        this.physics.reset(initial);
         this.controller.reset();
-        this.performance.reset();
-        this.performance.setMode(this.ui.mode);
-        this.manualControl = false;
-
-        // Reset des integrales du controleur
-        this.thetaIntegral = 0;
-        this.xIntegral = 0;
+        this.performance.reset(this.ui.mode, 0);
+        this.performance.t0 = 0;
+        this.pendingImpulseAt = scenario === 'impulse' ? 1.0 : null;
 
         this.anglePlot.clear();
         this.positionPlot.clear();
+        this.positionPlot.reference = this.ui.mode === 'project' ? this.targetX : null;
 
-        this.updateSimulation();
-
-        // Demarre automatiquement la simulation pour l'animation
-        if (scenario !== 'impulse') {
-            setTimeout(() => {
-                this.play();
-            }, 500);
-        }
+        this.render();
     }
 
     applyImpulse() {
-        this.physics.applyImpulse(1.0);
+        this.physics.applyImpulse(1.0); // 1 N.s
     }
 
     autoTune() {
-        const gains = this.controller.autoTune();
-        this.ui.setPIDParams(gains);
+        const p = this.ui.getSystemParams();
+        const speed = PIDController.presetSpeed(this.ui.pidPreset.value);
+        this.ui.setGains(PIDController.autoTune(p, speed));
+        if (this.ui.pidPreset.value === 'custom') this.ui.pidPreset.value = 'nominal';
     }
 
     applyPreset() {
-        const preset = this.ui.pidPreset.value;
-        if (preset !== 'custom') {
-            const gains = PIDController.getPreset(preset);
-            this.ui.setPIDParams(gains);
-        }
+        if (this.ui.pidPreset.value !== 'custom') this.autoTune();
     }
 
     loadScenario() {
+        if (this.ui.scenarioSelect.value === 'position') this.ui.setMode('project');
+        else this.ui.setMode('strict');
         this.reset();
-
-        const scenario = this.ui.scenarioSelect.value;
-        if (scenario === 'impulse') {
-            // Pour l'impulsion, on attend que l'utilisateur demarre
-            setTimeout(() => {
-                setTimeout(() => this.applyImpulse(), 500);
-            }, 100);
-        } else if (scenario === 'position') {
-            this.ui.setMode('project');
-            // La simulation demarre automatiquement via reset()
-        }
-        // Pour 'nominal', la simulation demarre automatiquement via reset()
+        this.play();
     }
 
-    gameLoop() {
+    loop(now) {
         if (!this.isRunning) return;
 
-        const currentTime = performance.now();
-        const deltaTime = (currentTime - this.lastTime) / 1000;
+        // Pas fixe, synchronise sur le temps reel (max 0.1 s rattrape par image)
+        const sim = this.ui.getSimulationParams();
+        this.physics.dt = sim.dt;
+        this.accumulator += Math.min((now - this.lastTime) / 1000, 0.1);
+        this.lastTime = now;
 
-        if (deltaTime >= this.physics.dt) {
-            this.update();
-            this.lastTime = currentTime;
+        if (!this.animation.isDragging) {
+            this.physics.updateParams(this.ui.getSystemParams());
+            this.controller.setGains(this.ui.getGains());
+            while (this.accumulator >= sim.dt) {
+                this.update(sim);
+                this.accumulator -= sim.dt;
+            }
+        } else {
+            this.accumulator = 0;
         }
 
         this.render();
-        this.animationId = requestAnimationFrame(() => this.gameLoop());
+        this.animationId = requestAnimationFrame((t) => this.loop(t));
     }
 
-    update() {
-        this.updateParameters();
+    update(sim) {
+        const p = this.physics;
 
-        // Applique toujours le controle, meme en mode manuel (avec force reduite)
-        let force = 0;
-        if (!this.manualControl) {
-            force = this.calculateControl();
-        } else {
-            // Mode manuel : controle reduit mais toujours actif
-            force = this.calculateControl() * 0.3; // Force reduite en mode manuel
+        if (this.pendingImpulseAt !== null && p.t >= this.pendingImpulseAt) {
+            this.applyImpulse();
+            this.pendingImpulseAt = null;
+            // Les mesures demarrent a la perturbation
+            this.performance.reset(this.ui.mode, p.x);
+            this.performance.t0 = p.t;
         }
 
-        const simParams = this.ui.getSimulationParams();
-        this.physics.dt = simParams.dt;
-        this.physics.step(force, simParams.integrator);
+        let F = this.controller.compute(p.state, this.targetX, sim.dt);
+        if (this.keys.left) F -= this.keyForce;
+        if (this.keys.right) F += this.keyForce;
 
-        // Detection de problemes mais sans reset automatique
-        // Le systeme doit continuer a essayer de se stabiliser
-        // if (this.physics.hasFallen()) {
-        //     console.log('Systeme instable detecte - le controle continue');
-        // }
+        p.step(F, sim.integrator);
 
-        const targetX = this.ui.mode === 'project' ? 0.2 : 0;
-        const metrics = this.performance.update(
-            this.physics.t,
-            this.physics.x,
-            this.physics.theta,
-            targetX,
-            0
-        );
-
-        this.anglePlot.addPoint(this.physics.t, this.physics.theta);
-        this.positionPlot.addPoint(this.physics.t, this.physics.x);
-
-        this.ui.updateIndicators(metrics);
-    }
-
-    updateParameters() {
-        const pidParams = this.ui.getPIDParams();
-        this.controller.setGains(pidParams.kp, pidParams.ki, pidParams.kd);
-
-        const sysParams = this.ui.getSystemParams();
-        this.physics.updateParams(sysParams);
-    }
-
-    calculateControl() {
-        const theta = this.physics.theta;
-        const theta_dot = this.physics.theta_dot;
-        const x = this.physics.x;
-        const x_dot = this.physics.x_dot;
-
-        // Normalise l'angle entre -PI et PI (comme dans le modele de reference)
-        let normalizedTheta = theta;
-        while (normalizedTheta > Math.PI) normalizedTheta -= 2 * Math.PI;
-        while (normalizedTheta < -Math.PI) normalizedTheta += 2 * Math.PI;
-
-        if (this.ui.mode === 'strict') {
-            // Controleur PD simple et efficace (formule du modele de reference)
-            // F = -Kp*θ - Kd*θ˙
-            // Efficace pres de l'equilibre
-
-            const pidGains = this.ui.getPIDParams();
-            const Kp = pidGains.kp;
-            const Kd = pidGains.kd;
-
-            // Force PD principale
-            const F_pd = -Kp * normalizedTheta - Kd * theta_dot;
-
-            // Petit terme de rappel de position pour eviter la derive
-            const F_position = -1.0 * x - 1.5 * x_dot;
-
-            return F_pd + F_position;
-
-        } else {
-            // Mode projet - suivi de position avec PD
-            const pidGains = this.ui.getPIDParams();
-
-            // Force pour l'angle
-            const F_angle = -pidGains.kp * normalizedTheta - pidGains.kd * theta_dot;
-
-            // Force pour la position (suivi de 0.2m)
-            const positionError = 0.2 - x;
-            const F_position = 10 * positionError - 3 * x_dot;
-
-            return F_angle + F_position;
-        }
+        this.performance.update(p.t - (this.performance.t0 || 0), p.x, p.theta, this.targetX);
+        this.anglePlot.addPoint(p.t, p.theta);
+        this.positionPlot.addPoint(p.t, p.x);
     }
 
     render() {
-        const targetX = this.ui.mode === 'project' ? 0.2 : null;
-        this.animation.draw(
-            this.physics.x,
-            this.physics.theta,
-            this.physics.l,
-            targetX
-        );
-
+        const p = this.physics;
+        this.animation.draw(p.x, p.theta, p.l, p.lastForce, this.ui.mode === 'project' ? this.targetX : null);
         this.anglePlot.draw();
         this.positionPlot.draw();
-    }
-
-    updateSimulation() {
-        this.render();
+        this.ui.updateIndicators(this.performance.getMetrics(p.lastForce));
     }
 }
 
 // ===== INITIALISATION =====
-document.addEventListener('DOMContentLoaded', () => {
-    const app = new InvertedPendulumApp();
-    window.pendulumApp = app;
-});
+if (typeof document !== 'undefined') {
+    document.addEventListener('DOMContentLoaded', () => {
+        window.pendulumApp = new InvertedPendulumApp();
+    });
+}
+
+if (typeof module !== 'undefined') {
+    module.exports = { Physics, PIDController, wrapAngle };
+}

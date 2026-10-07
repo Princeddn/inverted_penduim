@@ -1,516 +1,178 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Pendule inversé sur chariot — Simulation</title>
-  <style>
-    :root {
-      --bg: #0f172a; /* slate-900 */
-      --panel: #111827ee; /* gray-900 */
-      --text: #e5e7eb; /* gray-200 */
-      --muted: #94a3b8; /* slate-400 */
-      --accent: #22d3ee; /* cyan-400 */
-      --accent-2: #a78bfa; /* violet-400 */
-      --ok: #10b981; /* emerald-500 */
-      --warn: #f59e0b; /* amber-500 */
-      --danger: #ef4444; /* red-500 */
-    }
-    html, body { height: 100%; }
-    body {
-      margin: 0; background: radial-gradient(80vw 80vh at 70% 10%, #0b1229, var(--bg));
-      color: var(--text); font-family: ui-sans-serif, system-ui, Segoe UI, Roboto, Helvetica, Arial;
-      display: grid; grid-template-rows: auto 1fr auto; gap: 12px;
-    }
-    header { padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; }
-    header h1 { margin: 0; font-size: 18px; letter-spacing: .5px; }
-    .badge { font-size: 12px; padding: 4px 8px; border-radius: 999px; background: #0b3a42; color: #67e8f9; }
-
-    main { display: grid; grid-template-columns: 360px 1fr; gap: 12px; padding: 0 12px 12px; }
-
-    .panel {
-      background: var(--panel); border: 1px solid #1f2937; border-radius: 14px; overflow: hidden;
-      box-shadow: 0 10px 40px #0006;
-    }
-    .panel header { background: #0b1222aa; border-bottom: 1px solid #1f2937; }
-    .panel header h2 { margin: 0; font-size: 14px; color: var(--muted); }
-
-    #controls { padding: 12px 14px; display: grid; gap: 10px; }
-    .row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px; }
-    .row > label { font-size: 12px; color: var(--muted); }
-    .row input[type="range"] { width: 180px; }
-    .row input[type="number"] { width: 90px; background: #0b1222; border: 1px solid #243047; color: var(--text); padding: 6px 8px; border-radius: 8px; }
-    .row select { width: 200px; background: #0b1222; border: 1px solid #243047; color: var(--text); padding: 6px 8px; border-radius: 8px; }
-
-    .buttons { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-    button {
-      background: #0b1222; border: 1px solid #243047; color: var(--text);
-      padding: 10px 12px; border-radius: 10px; cursor: pointer; font-weight: 600;
-      transition: transform .05s ease, background .2s ease, border-color .2s ease;
-    }
-    button:hover { background: #0c152b; border-color: #2d3b58; }
-    button:active { transform: translateY(1px) scale(.99); }
-    .primary { background: linear-gradient(135deg, #0b3a42, #111f3f); color: #c7f9ff; border-color: #1e3a8a; }
-
-    #canvasWrap { position: relative; }
-    canvas { width: 100%; height: 62vh; max-height: 720px; display: block; background: linear-gradient(#0b1222 30%, #0a1020),
-             linear-gradient(90deg, #0b1222 30%, #0a1020);
-    }
-    .hud { position: absolute; left: 16px; top: 12px; font-size: 12px; color: #cbd5e1; background: #0b1222cc; padding: 8px 10px; border-radius: 10px; border: 1px solid #1f2937; }
-    .legend { display: flex; gap: 10px; margin-top: 6px; }
-    .dot { width: 8px; height: 8px; border-radius: 999px; display: inline-block; }
-    .dot.cart { background: var(--accent); }
-    .dot.pole { background: var(--accent-2); }
-    .foot { padding: 8px 12px; color: var(--muted); font-size: 12px; }
-    .kbd { background: #0b1222; border: 1px solid #243047; padding: 2px 6px; border-radius: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; color: #cbd5e1; }
-
-    /* Responsive */
-    @media (max-width: 1000px) {
-      main { grid-template-columns: 1fr; }
-      #canvas { height: 58vh; max-height: 640px; }
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pendule inversé sur chariot</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <header>
-    <h1>Pendule inversé sur chariot — Simulation temps réel</h1>
-    <span class="badge">RK4 • Contrôle PID / PD</span>
-  </header>
+<div class="container">
+    <header>
+        <h1>Pendule inversé sur chariot</h1>
+        <p class="subtitle">Simulation temps réel (RK4) • Contrôle par retour d'état PID + position</p>
+    </header>
 
-  <main>
-    <section class="panel">
-      <header><h2>Paramètres & Contrôles</h2></header>
-      <div id="controls">
-        <div class="buttons">
-          <button id="play" class="primary">▶︎ Lancer</button>
-          <button id="pause">⏸︎ Pause</button>
-          <button id="reset">↺ Réinitialiser</button>
-        </div>
+    <div class="main-content">
+        <aside class="control-panel">
+            <div class="control-group">
+                <h3>Simulation</h3>
+                <div class="button-grid">
+                    <button id="play-btn" class="btn-success">▶ Lancer</button>
+                    <button id="pause-btn" class="btn-warning">⏸ Pause</button>
+                    <button id="reset-btn" class="btn-secondary">↺ Réinitialiser</button>
+                    <button id="impulse-btn" class="btn-danger">⚡ Impulsion</button>
+                </div>
+                <div class="mode-selector">
+                    <button id="strict-mode" class="mode-btn active">Stabilisation</button>
+                    <button id="project-mode" class="mode-btn">Suivi x = 0.2 m</button>
+                </div>
+                <label for="scenario">Scénario</label>
+                <select id="scenario">
+                    <option value="nominal">Nominal (θ₀ = 0.1 rad)</option>
+                    <option value="impulse">Rejet d'impulsion (1 N·s à t = 1 s)</option>
+                    <option value="position">Suivi de position (0.2 m)</option>
+                </select>
+                <label for="integrator">Intégrateur</label>
+                <select id="integrator">
+                    <option value="rk4">Runge-Kutta 4</option>
+                    <option value="euler">Euler explicite</option>
+                </select>
+                <div class="param-row">
+                    <label for="dt-slider">Δt</label>
+                    <input type="range" id="dt-slider" min="1" max="20" step="1" value="5">
+                    <span class="value" id="dt-value"></span>
+                </div>
+            </div>
 
-        <div class="row"><label>Mode</label>
-          <select id="mode">
-            <option value="manual">Manuel (←/→ ou slider)</option>
-            <option value="pd">Stabilisation PD (autour de θ=0)</option>
-            <option value="pid">Stabilisation PID (optimale)</option>
-          </select>
-        </div>
+            <div class="control-group">
+                <h3>Contrôleur</h3>
+                <select id="pid-preset">
+                    <option value="soft">Doux</option>
+                    <option value="nominal" selected>Nominal</option>
+                    <option value="aggressive">Rapide</option>
+                    <option value="custom">Personnalisé</option>
+                </select>
+                <div class="param-row">
+                    <label for="kp-slider">Kp (θ)</label>
+                    <input type="range" id="kp-slider" min="0" max="200" step="0.1" value="80">
+                    <span class="value" id="kp-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="ki-slider">Ki (∫θ)</label>
+                    <input type="range" id="ki-slider" min="0" max="50" step="0.1" value="0">
+                    <span class="value" id="ki-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="kd-slider">Kd (θ˙)</label>
+                    <input type="range" id="kd-slider" min="0" max="50" step="0.1" value="17">
+                    <span class="value" id="kd-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="kx-slider">Kx (x)</label>
+                    <input type="range" id="kx-slider" min="0" max="50" step="0.1" value="12">
+                    <span class="value" id="kx-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="kv-slider">Kv (x˙)</label>
+                    <input type="range" id="kv-slider" min="0" max="50" step="0.1" value="15">
+                    <span class="value" id="kv-value"></span>
+                </div>
+                <button id="auto-tune" class="btn-primary" style="width:100%">Auto-réglage (placement de pôles)</button>
+            </div>
 
-        <div class="row"><label>Force manuelle F (N)</label>
-          <input type="range" id="force" min="-40" max="40" step="0.5" value="0">
-          <input type="number" id="forceNum" min="-40" max="40" step="0.5" value="0">
-        </div>
+            <div class="control-group">
+                <h3>Système</h3>
+                <div class="param-row">
+                    <label for="mc-slider">m<sub>c</sub> (kg)</label>
+                    <input type="range" id="mc-slider" min="0.1" max="5" step="0.1" value="1">
+                    <span class="value" id="mc-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="mp-slider">m<sub>p</sub> (kg)</label>
+                    <input type="range" id="mp-slider" min="0.05" max="2" step="0.05" value="0.3">
+                    <span class="value" id="mp-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="l-slider">l (m)</label>
+                    <input type="range" id="l-slider" min="0.1" max="1.5" step="0.05" value="0.5">
+                    <span class="value" id="l-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="b-slider">b (N·s/m)</label>
+                    <input type="range" id="b-slider" min="0" max="1" step="0.01" value="0.05">
+                    <span class="value" id="b-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="c-slider">c (N·m·s)</label>
+                    <input type="range" id="c-slider" min="0" max="0.1" step="0.005" value="0.01">
+                    <span class="value" id="c-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="g-slider">g (m/s²)</label>
+                    <input type="range" id="g-slider" min="1" max="20" step="0.01" value="9.81">
+                    <span class="value" id="g-value"></span>
+                </div>
+                <div class="param-row">
+                    <label for="fmax-slider">F<sub>max</sub> (N)</label>
+                    <input type="range" id="fmax-slider" min="5" max="200" step="1" value="50">
+                    <span class="value" id="fmax-value"></span>
+                </div>
+                <p style="font-size:0.85em;color:#7f8c8d">Après un changement de paramètres, cliquez sur « Auto-réglage ».</p>
+            </div>
+        </aside>
 
-        <hr style="border-color:#1f2937; opacity:.4;" />
-        <div class="row"><label>Masse du chariot m<sub>c</sub> (kg)</label>
-          <input type="range" id="mc" min="0.1" max="5" step="0.1" value="1.0">
-          <input type="number" id="mcNum" min="0.1" max="5" step="0.1" value="1.0">
-        </div>
-        <div class="row"><label>Masse du pendule m<sub>p</sub> (kg)</label>
-          <input type="range" id="mp" min="0.05" max="2" step="0.05" value="0.2">
-          <input type="number" id="mpNum" min="0.05" max="2" step="0.05" value="0.2">
-        </div>
-        <div class="row"><label>Longueur l (m) (pivot → centre de masse)</label>
-          <input type="range" id="l" min="0.1" max="2" step="0.01" value="0.5">
-          <input type="number" id="lNum" min="0.1" max="2" step="0.01" value="0.5">
-        </div>
-        <div class="row"><label>Frottement chariot b (N·s/m)</label>
-          <input type="range" id="b" min="0" max="2" step="0.01" value="0.15">
-          <input type="number" id="bNum" min="0" max="2" step="0.01" value="0.15">
-        </div>
-        <div class="row"><label>Frottement pendule c (N·m·s)</label>
-          <input type="range" id="c" min="0" max="0.2" step="0.005" value="0.02">
-          <input type="number" id="cNum" min="0" max="0.2" step="0.005" value="0.02">
-        </div>
-        <div class="row"><label>Gravité g (m/s²)</label>
-          <input type="range" id="g" min="-5" max="20" step="0.1" value="9.81">
-          <input type="number" id="gNum" min="-5" max="20" step="0.1" value="9.81">
-        </div>
-        <div class="row"><label>Δt (s)</label>
-          <input type="range" id="dt" min="0.002" max="0.02" step="0.001" value="0.008">
-          <input type="number" id="dtNum" min="0.002" max="0.02" step="0.001" value="0.008">
-        </div>
+        <section class="simulation-area">
+            <div class="performance-indicators">
+                <div class="indicator" id="stability-indicator">
+                    <h4>Temps de stabilisation</h4>
+                    <div class="value" id="stability-time">-- s</div>
+                </div>
+                <div class="indicator" id="angle-indicator">
+                    <h4>Angle max |θ|</h4>
+                    <div class="value" id="max-angle">0 rad</div>
+                </div>
+                <div class="indicator" id="rise-indicator">
+                    <h4>Temps de montée (90 %)</h4>
+                    <div class="value" id="rise-time">-- s</div>
+                </div>
+                <div class="indicator" id="error-indicator">
+                    <h4>Erreur statique</h4>
+                    <div class="value" id="steady-error">-- %</div>
+                </div>
+                <div class="indicator" id="status-indicator">
+                    <h4>État • Force</h4>
+                    <div class="value"><span id="system-status">En cours</span> • <span id="force-value">0 N</span></div>
+                </div>
+            </div>
 
-        <hr style="border-color:#1f2937; opacity:.4;" />
-        <div class="row"><label>Kp (contrôle sur θ)</label>
-          <input type="range" id="kp" min="0" max="200" step="1" value="25">
-          <input type="number" id="kpNum" min="0" max="200" step="1" value="25">
-        </div>
-        <div class="row"><label>Ki (intégrale sur θ)</label>
-          <input type="range" id="ki" min="0" max="50" step="0.5" value="15">
-          <input type="number" id="kiNum" min="0" max="50" step="0.5" value="15">
-        </div>
-        <div class="row"><label>Kd (dérivée sur θ)</label>
-          <input type="range" id="kd" min="0" max="40" step="0.5" value="8">
-          <input type="number" id="kdNum" min="0" max="40" step="0.5" value="8">
-        </div>
-        <div class="row"><label>Limite |F| (N)</label>
-          <input type="range" id="flim" min="5" max="200" step="1" value="30">
-          <input type="number" id="flimNum" min="5" max="200" step="1" value="30">
-        </div>
+            <div class="canvas-container">
+                <canvas id="animation-canvas" width="800" height="450" style="width:100%;height:auto"></canvas>
+            </div>
 
-        <div class="foot">
-          Astuces : clavier <span class="kbd">←</span>/<span class="kbd">→</span> applique ±10 N (mode Manuel). Double‑clic sur la scène pour donner une impulsion au pendule.
-        </div>
-      </div>
+            <div class="plots-container">
+                <canvas id="angle-plot" width="500" height="260" style="width:100%;height:auto"></canvas>
+                <canvas id="position-plot" width="500" height="260" style="width:100%;height:auto"></canvas>
+            </div>
+        </section>
+    </div>
+
+    <section class="readme-section">
+        <h2>Modèle et commande</h2>
+        <p>État : position du chariot <em>x</em>, angle <em>θ</em> mesuré depuis la verticale haute (θ &gt; 0 vers la droite).</p>
+        <div class="equation">(m<sub>c</sub>+m<sub>p</sub>) ẍ + m<sub>p</sub> l cos θ θ̈ = F − b ẋ + m<sub>p</sub> l θ̇² sin θ</div>
+        <div class="equation">cos θ ẍ + l θ̈ = g sin θ − c/(m<sub>p</sub> l) θ̇</div>
+        <p>Commande (saturée à ±F<sub>max</sub>) :</p>
+        <div class="equation">F = K<sub>p</sub> θ + K<sub>i</sub> ∫θ dt + K<sub>d</sub> θ̇ + K<sub>x</sub> (x − x<sub>ref</sub>) + K<sub>v</sub> ẋ</div>
+        <ul>
+            <li>Les gains sont positifs : pour rattraper le pendule, le chariot doit aller <strong>dans le sens</strong> de l'inclinaison.</li>
+            <li>L'auto-réglage linéarise le système autour de θ = 0 et place les pôles (Ackermann) : 2 pôles lents pour la position, 2 rapides pour l'angle.</li>
+            <li>Au-delà de |θ| = 90°, le contrôleur considère le pendule tombé et coupe la force.</li>
+            <li>Interaction : glissez le chariot ou la masse, ou poussez le chariot avec les flèches ← / →.</li>
+        </ul>
     </section>
+</div>
 
-    <section class="panel" id="canvasWrap">
-      <header><h2>Scène</h2></header>
-      <canvas id="canvas" width="1280" height="720"></canvas>
-      <div class="hud" id="hud"></div>
-    </section>
-  </main>
-
-  <footer class="foot">
-    Modèle : chariot (x) + pendule (θ, vertical vers le haut = 0 rad). Intégration RK4. Unités SI.
-  </footer>
-
-  <script>
-    // =============================
-    // 1) UTILITAIRES
-    // =============================
-    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-    const wrapPi = (a) => {
-      // enroule angle dans [-π,π]
-      const pi = Math.PI, two = 2*pi;
-      a = (a + pi) % two; if (a < 0) a += two; return a - pi;
-    };
-
-    // =============================
-    // 2) ETAT & PARAMETRES
-    // =============================
-    const state = { x: 0, xdot: 0, th: 8 * Math.PI/180, thdot: 0 }; // θ=8° pour démarrer
-    const params = { mc: 1.0, mp: 0.2, l: 0.5, b: 0.15, c: 0.02, g: 9.81, dt: 0.008 };
-    const ctrl = { mode: 'pd', F: 0, Kp: 25, Ki: 15, Kd: 8, Flim: 30 };
-
-    // Variables d'état pour contrôleur PID
-    let thetaIntegral = 0;
-
-    // =============================
-    // 3) MODELE DYNAMIQUE (cart-pole)
-    // Architecture propre du modèle de référence avec équations améliorées
-    // =============================
-    function deriv(s, p, F) {
-      const { mc, mp, l, b, c, g } = p;
-      const { x, xdot, th, thdot } = s;
-
-      const S = Math.sin(th), C = Math.cos(th);
-      const totalM = mc + mp;
-
-      // Matrice implicite 2x2 sur [x¨, θ¨]^T (méthode optimisée)
-      // (mc+mp) * x¨ + b x˙ + mp l (θ¨ cosθ - θ˙² sinθ) = F
-      // l θ¨ + (c/(mp l)) θ˙ + g sinθ = - x¨ cosθ
-
-      const a11 = totalM;
-      const a12 = mp * l * C;
-      const a21 = C;
-      const a22 = l;
-
-      const v1 = F - b*xdot - mp*l*thdot*thdot*S;
-      const v2 = -(c/(mp*l)) * thdot - g*S;
-
-      // Résolution 2x2 : det = (mc+mp)*l - mp*l*C*C = l(mc + mp*(1 - C^2))
-      const det = a11*a22 - a12*a21;
-
-      // Protection contre division par zéro
-      if (Math.abs(det) < 1e-6) {
-        return { xdot: 0, xdd: 0, thdot: 0, thdd: 0 };
-      }
-
-      const inv11 =  a22 / det;
-      const inv12 = -a12 / det;
-      const inv21 = -a21 / det;
-      const inv22 =  a11 / det;
-
-      const xdd  = inv11 * v1 + inv12 * v2;
-      const thdd = inv21 * v1 + inv22 * v2;
-
-      return { xdot, xdd, thdot, thdd };
-    }
-
-    // =============================
-    // 4) INTEGRATEUR RK4
-    // =============================
-    function rk4Step(s, p, F, dt) {
-      const S1 = deriv(s, p, F);
-      const s2 = { x: s.x + dt*0.5*S1.xdot, xdot: s.xdot + dt*0.5*S1.xdd, th: s.th + dt*0.5*S1.thdot, thdot: s.thdot + dt*0.5*S1.thdd };
-      const S2 = deriv(s2, p, F);
-      const s3 = { x: s.x + dt*0.5*S2.xdot, xdot: s.xdot + dt*0.5*S2.xdd, th: s.th + dt*0.5*S2.thdot, thdot: s.thdot + dt*0.5*S2.thdd };
-      const S3 = deriv(s3, p, F);
-      const s4 = { x: s.x + dt*S3.xdot, xdot: s.xdot + dt*S3.xdd, th: s.th + dt*S3.thdot, thdot: s.thdot + dt*S3.thdd };
-      const S4 = deriv(s4, p, F);
-
-      s.x    += (dt/6) * (S1.xdot + 2*S2.xdot + 2*S3.xdot + S4.xdot);
-      s.xdot += (dt/6) * (S1.xdd  + 2*S2.xdd  + 2*S3.xdd  + S4.xdd);
-      s.th   = wrapPi(s.th + (dt/6) * (S1.thdot + 2*S2.thdot + 2*S3.thdot + S4.thdot));
-      s.thdot+= (dt/6) * (S1.thdd + 2*S2.thdd + 2*S3.thdd + S4.thdd);
-
-      // LIMITATION DE POSITION DU CHARIOT
-      const maxPosition = 3.0; // limite physique du rail (mètres)
-      const softLimit = 2.5;   // zone d'amortissement
-
-      if (s.x > maxPosition) {
-        s.x = maxPosition;
-        s.xdot = Math.min(0, s.xdot * 0.1); // rebond amorti
-      } else if (s.x < -maxPosition) {
-        s.x = -maxPosition;
-        s.xdot = Math.max(0, s.xdot * 0.1); // rebond amorti
-      }
-
-      // Amortissement progressif près des limites
-      if (Math.abs(s.x) > softLimit) {
-        const factor = (Math.abs(s.x) - softLimit) / (maxPosition - softLimit);
-        s.xdot *= (1 - factor * 0.5);
-      }
-    }
-
-    // =============================
-    // 5) CONTROLE
-    // =============================
-    const keys = { left: false, right: false };
-    window.addEventListener('keydown', (e) => {
-      if (e.key === 'ArrowLeft') { keys.left = true; }
-      if (e.key === 'ArrowRight') { keys.right = true; }
-    });
-    window.addEventListener('keyup', (e) => {
-      if (e.key === 'ArrowLeft') { keys.left = false; }
-      if (e.key === 'ArrowRight') { keys.right = false; }
-    });
-
-    function computeForce() {
-      if (ctrl.mode === 'manual') {
-        let F = ctrl.F;
-        if (keys.left)  F -= 10;
-        if (keys.right) F += 10;
-        return clamp(F, -ctrl.Flim, ctrl.Flim);
-      }
-
-      // Normalisation de l'angle
-      const th = wrapPi(state.th);
-
-      if (ctrl.mode === 'pd') {
-        // Contrôleur PD avec limitation d'angle pour éviter rotation infinie
-
-        // Si le pendule tourne trop (|θ| > π/2), priorité au freinage
-        if (Math.abs(th) > Math.PI/2) {
-          // Force de freinage pure pour arrêter la rotation
-          const emergencyBraking = -ctrl.Kd * 3.0 * state.thdot;
-          // Plus petite force de rappel de position
-          const positionReturn = -1.0 * state.x - 0.5 * state.xdot;
-          const F = emergencyBraking + positionReturn;
-          return clamp(F, -ctrl.Flim, ctrl.Flim);
-        }
-
-        // Contrôle normal pour petits angles (zone de stabilisation)
-        // 1) Terme proportionnel : "se placer sous la masse"
-        const placementForce = -ctrl.Kp * th;
-
-        // 2) Terme dérivé : "freiner au bon moment"
-        const brakingForce = -ctrl.Kd * state.thdot;
-
-        // 3) Force de rappel de position renforcée pour éviter la dérive
-        const positionReturn = -2.0 * state.x - 1.5 * state.xdot;
-
-        const F = placementForce + brakingForce + positionReturn;
-        return clamp(F, -ctrl.Flim, ctrl.Flim);
-      }
-
-      if (ctrl.mode === 'pid') {
-        // Contrôleur PID complet avec formule de référence
-        // F = -kPθ·θ - kIθ·∫θdt - kDθ·ω
-
-        // Mise à jour de l'intégrale
-        thetaIntegral += th * params.dt;
-
-        // Anti-windup : limite l'intégrale
-        const maxIntegral = 0.5;
-        thetaIntegral = clamp(thetaIntegral, -maxIntegral, maxIntegral);
-
-        const F = -ctrl.Kp * th - ctrl.Ki * thetaIntegral - ctrl.Kd * state.thdot;
-        return clamp(F, -ctrl.Flim, ctrl.Flim);
-      }
-
-      return 0;
-    }
-
-    // =============================
-    // 6) RENDU
-    // =============================
-    const canvas = document.getElementById('canvas');
-    const ctx = canvas.getContext('2d');
-
-    // Échelle : 1 m → 120 px ; rail centré
-    let PIX = 120;
-
-    function draw() {
-      const w = canvas.width, h = canvas.height;
-      ctx.clearRect(0, 0, w, h);
-
-      // Fond quadrillé discret
-      ctx.save();
-      ctx.globalAlpha = 0.08;
-      const grid = 40;
-      ctx.beginPath();
-      for (let x=0; x<w; x+=grid) { ctx.moveTo(x,0); ctx.lineTo(x,h); }
-      for (let y=0; y<h; y+=grid) { ctx.moveTo(0,y); ctx.lineTo(w,y); }
-      ctx.strokeStyle = '#7dd3fc';
-      ctx.stroke();
-      ctx.restore();
-
-      // Sol / rail
-      const groundY = h - 120;
-      ctx.strokeStyle = '#1f2937';
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(20, groundY);
-      ctx.lineTo(w-20, groundY);
-      ctx.stroke();
-
-      // Conversion coord.
-      const xpix = w/2 + state.x * PIX;
-      const cartW = 120, cartH = 40;
-
-      // Chariot
-      ctx.fillStyle = '#22d3ee';
-      ctx.strokeStyle = '#0ea5b7';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.roundRect(xpix - cartW/2, groundY - cartH, cartW, cartH, 10);
-      ctx.fill(); ctx.stroke();
-
-      // Roues
-      const rw = 16, rh = 8;
-      ctx.fillStyle = '#94a3b8';
-      ctx.beginPath();
-      ctx.roundRect(xpix - cartW/3 - rw/2, groundY - rh, rw, rh, 4);
-      ctx.roundRect(xpix + cartW/3 - rw/2, groundY - rh, rw, rh, 4);
-      ctx.fill();
-
-      // Pendule (pivot au centre du chariot)
-      const pivotX = xpix, pivotY = groundY - cartH;
-      const L = params.l * PIX * 2; // tige de 2*l (longueur totale ≈ 2*l du centre de masse)
-      const th = state.th; // 0 en haut
-      const tipX = pivotX + L * Math.sin(th);
-      const tipY = pivotY + L * Math.cos(th);
-
-      // Tige
-      ctx.strokeStyle = '#a78bfa';
-      ctx.lineWidth = 6;
-      ctx.beginPath(); ctx.moveTo(pivotX, pivotY); ctx.lineTo(tipX, tipY); ctx.stroke();
-
-      // Masse
-      ctx.fillStyle = '#c4b5fd';
-      ctx.beginPath(); ctx.arc(tipX, tipY, 10 + Math.min(10, params.mp*6), 0, Math.PI*2); ctx.fill();
-
-      // Force appliquée (flèche)
-      const F = computeForce();
-      if (Math.abs(F) > 1e-3) {
-        const s = Math.sign(F);
-        const mag = Math.min(80, Math.abs(F)*1.2);
-        ctx.strokeStyle = s>0 ? '#10b981' : '#ef4444';
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(xpix, groundY - cartH*0.5);
-        ctx.lineTo(xpix + s*mag, groundY - cartH*0.5);
-        ctx.stroke();
-        // pointe
-        ctx.beginPath();
-        ctx.moveTo(xpix + s*mag, groundY - cartH*0.5);
-        ctx.lineTo(xpix + s*mag - 8*s, groundY - cartH*0.5 - 6);
-        ctx.lineTo(xpix + s*mag - 8*s, groundY - cartH*0.5 + 6);
-        ctx.closePath(); ctx.fillStyle = s>0 ? '#10b981' : '#ef4444'; ctx.fill();
-      }
-
-      // HUD
-      const hud = document.getElementById('hud');
-      hud.innerHTML = `
-        <div><strong>État</strong></div>
-        <div>x = ${state.x.toFixed(3)} m • x˙ = ${state.xdot.toFixed(3)} m/s</div>
-        <div>θ = ${(state.th*180/Math.PI).toFixed(2)}° • θ˙ = ${(state.thdot).toFixed(3)} rad/s</div>
-        <div>F = ${computeForce().toFixed(2)} N • Mode: ${ctrl.mode.toUpperCase()}</div>
-        <div class="legend"><span class="dot cart"></span> chariot <span class="dot pole"></span> pendule</div>
-      `;
-    }
-
-    // =============================
-    // 7) BOUCLE
-    // =============================
-    let anim = null;
-    function step() {
-      const F = computeForce();
-      rk4Step(state, params, F, params.dt);
-      draw();
-      anim = requestAnimationFrame(step);
-    }
-
-    // =============================
-    // 8) UI BINDINGS
-    // =============================
-    function bindPair(idRange, idNum, obj, key) {
-      const r = document.getElementById(idRange);
-      const n = document.getElementById(idNum);
-      const sync = (el, other) => {
-        let v = parseFloat(el.value);
-        if (!Number.isFinite(v)) return;
-        // contraintes simples
-        if (key === 'dt') v = clamp(v, 0.001, 0.05);
-        obj[key] = v; other.value = v;
-      };
-      r.addEventListener('input', () => sync(r, n));
-      n.addEventListener('input', () => sync(n, r));
-    }
-
-    // sliders ↔ numbers
-    bindPair('force','forceNum', ctrl, 'F');
-    bindPair('mc','mcNum', params, 'mc');
-    bindPair('mp','mpNum', params, 'mp');
-    bindPair('l','lNum', params, 'l');
-    bindPair('b','bNum', params, 'b');
-    bindPair('c','cNum', params, 'c');
-    bindPair('g','gNum', params, 'g');
-    bindPair('dt','dtNum', params, 'dt');
-    bindPair('kp','kpNum', ctrl, 'Kp');
-    bindPair('ki','kiNum', ctrl, 'Ki');
-    bindPair('kd','kdNum', ctrl, 'Kd');
-    bindPair('flim','flimNum', ctrl, 'Flim');
-
-    document.getElementById('mode').addEventListener('change', (e)=>{
-      ctrl.mode = e.target.value;
-      // Reset intégrale lors du changement de mode
-      thetaIntegral = 0;
-    });
-
-    document.getElementById('play').addEventListener('click', ()=>{ if (!anim) anim = requestAnimationFrame(step); });
-    document.getElementById('pause').addEventListener('click', ()=>{ if (anim) { cancelAnimationFrame(anim); anim = null; }});
-    document.getElementById('reset').addEventListener('click', ()=>{
-      state.x = 0; state.xdot = 0; state.th = 8*Math.PI/180; state.thdot = 0; ctrl.F = 0;
-      thetaIntegral = 0;
-      document.getElementById('force').value = 0; document.getElementById('forceNum').value = 0;
-      draw();
-    });
-
-    // Impulsion par double‑clic : ±Δθ˙
-    document.getElementById('canvas').addEventListener('dblclick', (e)=>{
-      const rect = e.target.getBoundingClientRect();
-      const cx = rect.left + rect.width/2;
-      const s = (e.clientX < cx) ? -1 : 1; // côté gauche/droite
-      state.thdot += s * 1.2;
-    });
-
-    // Init
-    draw();
-
-    // Ajuste la résolution du canvas pour écrans HiDPI
-    function fitCanvasDPI() {
-      const ratio = Math.min(window.devicePixelRatio || 1, 2);
-      const el = document.getElementById('canvas');
-      const { width, height } = el.getBoundingClientRect();
-      el.width = Math.round(width * ratio);
-      el.height = Math.round(height * ratio);
-      PIX = (120 * ratio);
-      draw();
-    }
-    new ResizeObserver(fitCanvasDPI).observe(document.getElementById('canvasWrap'));
-  </script>
+<script src="script.js"></script>
 </body>
 </html>
